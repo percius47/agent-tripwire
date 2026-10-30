@@ -4,14 +4,22 @@ Plant non-functional decoy credentials and get alerted when a coding agent reads
 
 ## Why
 
-Coding agents often search repos and home directories for secrets. Tripwire plants realistic-looking sibling files with unique, non-authenticating tokens, then watches agent session logs. If a token shows up, you get a desktop notification and a local hit record. **It detects; it does not block.**
+Coding agents can read files in repos and home directories, including secrets. Tripwire plants realistic-looking sibling files with unique, non-authenticating tokens, then watches agent session logs. If a token shows up, you get a desktop notification and a local hit record. **It detects; it does not block.**
 
 ## 60-second quickstart
 
+Not yet published to npm. Don't install `agent-tripwire` from the registry until this README says so.
+
 ```bash
-# install (pick one)
-npx agent-tripwire --help
-npm install -g agent-tripwire
+# install from source (pick one) — do not use npx/npm from the public registry
+git clone https://github.com/percius47/agent-tripwire.git
+cd agent-tripwire && npm ci && npm run build && npm link
+
+# or from a local pack
+npm pack && npm i -g ./agent-tripwire-0.1.0.tgz
+
+# or from GitHub (needs repo access while the repo is private)
+npm i -g github:percius47/agent-tripwire
 
 # in a git repo
 cd your-project
