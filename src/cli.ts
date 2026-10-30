@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { formatInitReport, runInit } from "./init.js";
+import { formatRemoveReport, runRemove } from "./remove.js";
 
 const program = new Command();
 
@@ -18,6 +19,22 @@ program
   .action(async (opts: { home?: boolean }) => {
     const report = await runInit({ home: opts.home === true });
     console.log(formatInitReport(report));
+    if (report.refused || report.rolledBack.length > 0) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("remove")
+  .description("Delete hash-matched decoys Tripwire created and clean exclude lines")
+  .option("--home", "Also remove home-level decoys")
+  .option("--dry-run", "Print the plan without deleting")
+  .action(async (opts: { home?: boolean; dryRun?: boolean }) => {
+    const report = await runRemove({
+      home: opts.home === true,
+      dryRun: opts.dryRun === true,
+    });
+    console.log(formatRemoveReport(report));
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {
