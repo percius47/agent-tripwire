@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { PRIVATE_FILE_MODE } from "./fs-mode.js";
 import { getManifestPath, getStateDir } from "./paths.js";
 
 export interface DecoyRecord {
@@ -15,10 +16,12 @@ export interface DecoyRecord {
 export interface Manifest {
   version: 1;
   decoys: DecoyRecord[];
+  /** Directories created by Tripwire (removed on `remove` only if empty). */
+  createdDirs: string[];
 }
 
 export function emptyManifest(): Manifest {
-  return { version: 1, decoys: [] };
+  return { version: 1, decoys: [], createdDirs: [] };
 }
 
 export async function ensureStateDir(): Promise<string> {
@@ -27,15 +30,44 @@ export async function ensureStateDir(): Promise<string> {
   return dir;
 }
 
+function assertManifestShape(parsed: unknown): Manifest {
+  if (parsed === null || typeof parsed !== "object") {
+    throw new Error("Invalid manifest: expected an object");
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.version !== 1) {
+    throw new Error(
+      `Invalid manifest: unsupported version ${String(obj.version)} (expected 1)`,
+    );
+  }
+  if (!Array.isArray(obj.decoys)) {
+    throw new Error("Invalid manifest: decoys must be an array");
+  }
+  const createdDirs = obj.createdDirs;
+  if (createdDirs === undefined) {
+    return { version: 1, decoys: obj.decoys as DecoyRecord[], createdDirs: [] };
+  }
+  if (!Array.isArray(createdDirs)) {
+    throw new Error("Invalid manifest: createdDirs must be an array");
+  }
+  return {
+    version: 1,
+    decoys: obj.decoys as DecoyRecord[],
+    createdDirs: createdDirs as string[],
+  };
+}
+
 export async function loadManifest(): Promise<Manifest> {
   const manifestPath = getManifestPath();
   try {
     const raw = await readFile(manifestPath, "utf8");
-    const parsed = JSON.parse(raw) as Manifest;
-    if (parsed.version !== 1 || !Array.isArray(parsed.decoys)) {
-      return emptyManifest();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("Invalid manifest: not valid JSON");
     }
-    return parsed;
+    return assertManifestShape(parsed);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
@@ -48,13 +80,32 @@ export async function loadManifest(): Promise<Manifest> {
 export async function saveManifest(manifest: Manifest): Promise<void> {
   await ensureStateDir();
   const manifestPath = getManifestPath();
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  const normalized: Manifest = {
+    version: 1,
+    decoys: manifest.decoys,
+    createdDirs: manifest.createdDirs ?? [],
+  };
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify(normalized, null, 2)}\n`,
+    { mode: PRIVATE_FILE_MODE },
+  );
+  // writeFile mode only applies on create; force 0600 on overwrite too.
+  await chmod(manifestPath, PRIVATE_FILE_MODE);
 }
 
 export function upsertDecoy(manifest: Manifest, record: DecoyRecord): Manifest {
   const decoys = manifest.decoys.filter((d) => d.path !== record.path);
   decoys.push(record);
-  return { ...manifest, decoys };
+  return { ...manifest, decoys, createdDirs: manifest.createdDirs ?? [] };
+}
+
+export function addCreatedDirs(manifest: Manifest, dirs: string[]): Manifest {
+  const set = new Set(manifest.createdDirs ?? []);
+  for (const d of dirs) {
+    set.add(path.resolve(d));
+  }
+  return { ...manifest, createdDirs: [...set].sort() };
 }
 
 export function absoluteWithin(root: string, relative: string): string {

@@ -19,6 +19,11 @@ vi.mock("node:net", async (importOriginal) => {
     ...actual,
     connect: forbid,
     createConnection: forbid,
+    Socket: class ForbiddenSocket {
+      constructor() {
+        throw new Error(MSG);
+      }
+    },
   };
 });
 
@@ -37,6 +42,32 @@ vi.mock("node:https", async (importOriginal) => {
     ...actual,
     request: forbid,
     get: forbid,
+  };
+});
+
+vi.mock("node:tls", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:tls")>();
+  return {
+    ...actual,
+    connect: forbid,
+  };
+});
+
+vi.mock("node:dns", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:dns")>();
+  return {
+    ...actual,
+    lookup: forbid,
+    resolve: forbid,
+    reverse: forbid,
+  };
+});
+
+vi.mock("node:dgram", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:dgram")>();
+  return {
+    ...actual,
+    createSocket: forbid,
   };
 });
 

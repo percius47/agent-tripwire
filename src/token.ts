@@ -38,10 +38,15 @@ function toBase32(bytes: Buffer): string {
   return output;
 }
 
+export function startsWithBannedPrefix(value: string): boolean {
+  const lower = value.toLowerCase();
+  return BANNED_PREFIXES.some((p) => lower.startsWith(p.toLowerCase()));
+}
+
 /**
  * Generate a non-functional decoy token: `tw` + 26 base32 characters.
  * Retries if the full string would start with a banned provider prefix
- * (defensive; the fixed `tw` prefix already avoids them).
+ * (case-insensitive; the fixed `tw` prefix already avoids them).
  */
 export function generateToken(): string {
   for (let attempt = 0; attempt < 32; attempt++) {
@@ -55,11 +60,13 @@ export function generateToken(): string {
   throw new Error("Failed to generate a token without a banned prefix");
 }
 
-export function startsWithBannedPrefix(value: string): boolean {
-  return BANNED_PREFIXES.some((p) => value.startsWith(p));
-}
-
 /** Generate a 40-char opaque secret-looking string (non-functional). */
 export function generateSecretLike(): string {
-  return toBase32(randomBytes(25)).slice(0, 40).toLowerCase();
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const secret = toBase32(randomBytes(25)).slice(0, 40).toLowerCase();
+    if (!startsWithBannedPrefix(secret)) {
+      return secret;
+    }
+  }
+  throw new Error("Failed to generate a secret without a banned prefix");
 }
