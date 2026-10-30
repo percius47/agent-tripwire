@@ -146,7 +146,7 @@ export async function plantOne(
     if (code !== "ENOENT") throw err;
   }
 
-  const { content, tokenId } = plan.render();
+  const { content, tokenId, matchValues } = plan.render();
   const dir = path.dirname(plan.path);
   const boundary = plan.scope === "project" ? projectRoot : undefined;
   const createdDirs = await ensureDirsCreated(dir, boundary);
@@ -174,6 +174,7 @@ export async function plantOne(
     path: plan.path,
     sha256: sha256(content),
     tokenId,
+    matchValues: [...new Set(matchValues.length > 0 ? matchValues : [tokenId])],
     createdAt: new Date().toISOString(),
     scope: plan.scope,
     ...(projectRoot !== undefined ? { projectRoot } : {}),

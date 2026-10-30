@@ -12,12 +12,21 @@ function runGit(
   const result = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
+    // Bound every git call so a stuck helper cannot freeze the suite.
+    timeout: 15_000,
     env: {
       ...process.env,
       GIT_OPTIONAL_LOCKS: "0",
       GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_ASKPASS: "",
+      GIT_EDITOR: "true",
+      GC_AUTO: "0",
     },
   });
+  if (result.error && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
+    return { status: 1, stdout: "", stderr: `git ${args.join(" ")} timed out` };
+  }
   return {
     status: result.status ?? 1,
     stdout: result.stdout ?? "",

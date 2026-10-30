@@ -2,6 +2,8 @@
 import { Command } from "commander";
 import { formatInitReport, runInit } from "./init.js";
 import { formatRemoveReport, runRemove } from "./remove.js";
+import { formatScanReport, runScan } from "./scan.js";
+import { startWatch } from "./watch.js";
 
 const program = new Command();
 
@@ -35,6 +37,46 @@ program
       dryRun: opts.dryRun === true,
     });
     console.log(formatRemoveReport(report));
+  });
+
+program
+  .command("scan")
+  .description(
+    "One-shot pass over known logs; exit 1 if any decoy token was found",
+  )
+  .action(async () => {
+    const report = await runScan();
+    console.log(formatScanReport(report));
+    process.exitCode = report.exitCode;
+  });
+
+program
+  .command("watch")
+  .description(
+    "Watch agent logs in the foreground and print alerts on decoy hits",
+  )
+  .action(async () => {
+    const handle = await startWatch({
+      onHit: (hit) => {
+        // Run 3: stdout only (token label + file). Desktop alerts are Run 4.
+        // Never print the full token.
+        console.log(hit.alertLine);
+      },
+    });
+    await handle.ready;
+    console.log("tripwire: watching (Ctrl+C to stop)");
+    const stop = async () => {
+      await handle.close();
+      process.exit(0);
+    };
+    process.once("SIGINT", () => {
+      void stop();
+    });
+    process.once("SIGTERM", () => {
+      void stop();
+    });
+    // Keep the process alive until signal.
+    await new Promise(() => undefined);
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {

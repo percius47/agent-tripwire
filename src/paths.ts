@@ -22,3 +22,15 @@ export function getStateDir(): string {
 export function getManifestPath(): string {
   return path.join(getStateDir(), "manifest.json");
 }
+
+export function getOffsetsPath(): string {
+  return path.join(getStateDir(), "offsets.json");
+}
+
+export function getHitsPath(): string {
+  return path.join(getStateDir(), "hits.jsonl");
+}
+
+export function getConfigPath(): string {
+  return path.join(getStateDir(), "config.json");
+}

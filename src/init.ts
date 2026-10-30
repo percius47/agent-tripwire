@@ -62,21 +62,43 @@ function removeDecoysFromManifest(
   };
 }
 
+/** All project decoys in `manifest` that belong to `projectRoot`. */
+function decoysForProject(
+  manifest: Manifest,
+  projectRoot: string,
+): DecoyRecord[] {
+  const root = path.resolve(projectRoot);
+  return manifest.decoys.filter(
+    (d) =>
+      d.scope === "project" &&
+      d.projectRoot !== undefined &&
+      path.resolve(d.projectRoot) === root,
+  );
+}
+
 /**
- * After planting project decoys in a git repo: write .git/info/exclude,
- * verify with check-ignore, and roll back any decoy that is not ignored.
+ * After planting project decoys in a git repo: write .git/info/exclude from
+ * ALL manifest decoys for this repo (not just this run's creates), verify
+ * newly created paths with check-ignore, and roll back any that fail.
  */
 async function secureGitIgnore(
   repoRoot: string,
   created: DecoyRecord[],
   manifest: Manifest,
+  projectRoot: string,
 ): Promise<{
   manifest: Manifest;
   excludePath: string;
   rolledBack: { path: string; reason: string }[];
   kept: DecoyRecord[];
 }> {
-  const relativePaths = created.map((c) => toRepoRelative(repoRoot, c.path));
+  // Always rewrite exclude from every decoy recorded for this project so a
+  // partial re-init (some paths skipped as already present) cannot drop
+  // earlier ignore lines.
+  const allForRepo = decoysForProject(manifest, projectRoot);
+  const relativePaths = allForRepo.map((c) =>
+    toRepoRelative(repoRoot, c.path),
+  );
   const excludePath = await writeExcludeBlock(repoRoot, relativePaths);
 
   const failed: DecoyRecord[] = [];
@@ -103,14 +125,18 @@ async function secureGitIgnore(
   }
 
   const kept = created.filter((c) => !failedPaths.has(c.path));
-  const keptRels = kept.map((c) => toRepoRelative(repoRoot, c.path));
-  await writeExcludeBlock(repoRoot, keptRels);
-
-  if (kept.length === 0) {
+  const next = removeDecoysFromManifest(manifest, failedPaths);
+  // Rewrite exclude from remaining ALL decoys for this repo (same as remove).
+  const remaining = decoysForProject(next, projectRoot);
+  if (remaining.length === 0) {
     await writeExcludeBlock(repoRoot, []);
+  } else {
+    await writeExcludeBlock(
+      repoRoot,
+      remaining.map((d) => toRepoRelative(repoRoot, d.path)),
+    );
   }
 
-  const next = removeDecoysFromManifest(manifest, failedPaths);
   await saveManifest(next);
   return { manifest: next, excludePath, rolledBack, kept };
 }
@@ -176,11 +202,17 @@ export async function runInit(options: InitOptions = {}): Promise<InitReport> {
   };
 
   if (inGit && repoRoot) {
-    if (projectResult.created.length > 0) {
+    // Always refresh exclude from the full project decoy set, even when this
+    // run created nothing new (e.g. all paths already existed).
+    if (
+      projectResult.created.length > 0 ||
+      decoysForProject(manifest, projectRoot).length > 0
+    ) {
       const secured = await secureGitIgnore(
         repoRoot,
         projectResult.created,
         manifest,
+        projectRoot,
       );
       manifest = secured.manifest;
       excludePath = secured.excludePath;
