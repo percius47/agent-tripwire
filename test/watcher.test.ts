@@ -552,7 +552,7 @@ describe("watcher engine", () => {
     }
   });
 
-  it("running scan twice does not append duplicate hits", async () => {
+  it("running scan twice exits 1 both times without growing hits.jsonl", async () => {
     const home = await makeTempHome();
     const restore = useHome(home);
     try {
@@ -565,11 +565,19 @@ describe("watcher engine", () => {
       const first = await runScan();
       expect(first.exitCode).toBe(1);
       expect(first.hits.length).toBeGreaterThanOrEqual(1);
+      expect(first.newHits.length).toBeGreaterThanOrEqual(1);
       const linesAfterFirst = (await loadHits()).length;
 
       const second = await runScan();
-      expect(second.hits).toHaveLength(0);
-      expect(second.exitCode).toBe(0);
+      expect(second.exitCode).toBe(1);
+      expect(second.hits.length).toBeGreaterThanOrEqual(1);
+      expect(second.newHits).toHaveLength(0);
+      expect(second.hits.every((h) => h.isNew === false)).toBe(true);
+      expect((await loadHits()).length).toBe(linesAfterFirst);
+
+      const newOnly = await runScan({ newOnly: true });
+      expect(newOnly.exitCode).toBe(0);
+      expect(newOnly.hits).toHaveLength(0);
       expect((await loadHits()).length).toBe(linesAfterFirst);
     } finally {
       restore();

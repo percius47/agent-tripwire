@@ -49,14 +49,19 @@ program
 program
   .command("scan")
   .description(
-    "One-shot pass over known logs; exit 1 if any decoy token was found",
+    "One-shot pass over known logs; exit 1 if any decoy token is still present",
   )
   .option("--no-notify", "Do not send desktop notifications")
-  .action(async (opts: { notify?: boolean }) => {
+  .option(
+    "--new-only",
+    "Exit 1 only for hits not already recorded in hits.jsonl",
+  )
+  .action(async (opts: { notify?: boolean; newOnly?: boolean }) => {
     const notify = opts.notify !== false;
-    const report = await runScan(
-      notify ? { onHit: (hit) => notifyHit(hit) } : {},
-    );
+    const report = await runScan({
+      newOnly: opts.newOnly === true,
+      ...(notify ? { onHit: (hit) => notifyHit(hit) } : {}),
+    });
     console.log(formatScanReport(report));
     process.exitCode = report.exitCode;
   });

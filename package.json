@@ -4,6 +4,26 @@
   "description": "Plant non-functional decoy credentials and alert when a coding agent reads them",
   "type": "module",
   "license": "MIT",
+  "author": "Prashant Singh Chauhan",
+  "keywords": [
+    "agent",
+    "tripwire",
+    "decoy",
+    "credentials",
+    "security",
+    "canary",
+    "claude-code",
+    "codex",
+    "secrets"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/percius47/agent-tripwire.git"
+  },
+  "bugs": {
+    "url": "https://github.com/percius47/agent-tripwire/issues"
+  },
+  "homepage": "https://github.com/percius47/agent-tripwire#readme",
   "engines": {
     "node": ">=20"
   },
@@ -23,7 +43,8 @@
     "test": "PATH=\"$HOME/.local/bin:$PATH\" vitest run --pool=forks --maxWorkers=2 --test-timeout=20000",
     "test:watch": "PATH=\"$HOME/.local/bin:$PATH\" vitest --pool=forks --maxWorkers=2 --test-timeout=20000",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "chokidar": "^4.0.3",

@@ -211,12 +211,14 @@ describe("notifications", () => {
         expect(opts.message).toContain(formatTokenLabel(tokenId));
       }
 
-      // Second scan: no new hits → no new notifications.
+      // Second scan: still exit 1 / report known hits, but no new notifications.
       notifyMock.mockClear();
       const again = await runScan({
         onHit: (h) => notifyHit(h),
       });
-      expect(again.hits).toHaveLength(0);
+      expect(again.exitCode).toBe(EXIT.FAIL);
+      expect(again.hits.length).toBeGreaterThanOrEqual(1);
+      expect(again.newHits).toHaveLength(0);
       expect(notifyMock).not.toHaveBeenCalled();
     } finally {
       restore();
