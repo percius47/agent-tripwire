@@ -1,4 +1,4 @@
-import { appendFile, chmod, mkdir, open } from "node:fs/promises";
+import { appendFile, chmod, mkdir, open, readFile } from "node:fs/promises";
 import { PRIVATE_FILE_MODE } from "./fs-mode.js";
 import { getHitsPath, getStateDir } from "./paths.js";
 
@@ -21,6 +21,65 @@ export interface HitRecord {
   decoyPath: string;
   /** Redacted snippet ≤ 200 chars (token replaced with label). */
   snippet: string;
+}
+
+/** Dedupe bag key: adapter + sourceFile + sessionId (not session alone). */
+export function hitDedupeKey(
+  adapter: string,
+  sourceFile: string,
+  sessionId: string,
+): string {
+  return `${adapter}\0${sourceFile}\0${sessionId}`;
+}
+
+/** Load all hit records from hits.jsonl (missing file → []). */
+export async function loadHits(): Promise<HitRecord[]> {
+  try {
+    const raw = await readFile(getHitsPath(), "utf8");
+    const out: HitRecord[] = [];
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) continue;
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (parsed !== null && typeof parsed === "object") {
+          const h = parsed as HitRecord;
+          if (
+            typeof h.tokenId === "string" &&
+            typeof h.sourceFile === "string" &&
+            typeof h.sessionId === "string" &&
+            typeof h.adapter === "string"
+          ) {
+            out.push(h);
+          }
+        }
+      } catch {
+        // skip corrupt lines
+      }
+    }
+    return out;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return [];
+    throw err;
+  }
+}
+
+/** Seed in-memory dedupe from persisted hits (tokenId per adapter/file/session). */
+export function seedSeenFromHits(
+  hits: HitRecord[],
+): Map<string, Set<string>> {
+  const seen = new Map<string, Set<string>>();
+  for (const h of hits) {
+    const key = hitDedupeKey(h.adapter, h.sourceFile, h.sessionId);
+    let bag = seen.get(key);
+    if (!bag) {
+      bag = new Set();
+      seen.set(key, bag);
+    }
+    bag.add(h.tokenId);
+  }
+  return seen;
 }
 
 function redactSnippet(text: string, tokenValue: string, label: string): string {
