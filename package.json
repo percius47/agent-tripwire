@@ -1,0 +1,39 @@
+{
+  "name": "agent-tripwire",
+  "version": "0.1.0",
+  "description": "Plant non-functional decoy credentials and alert when a coding agent reads them",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "agent-tripwire": "./dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
+    "test": "vitest run --pool=forks --maxWorkers=2",
+    "test:watch": "vitest --pool=forks --maxWorkers=2",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "commander": "^13.1.0",
+    "node-notifier": "^10.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/node-notifier": "^8.0.5",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  }
+}
