@@ -23,8 +23,9 @@ export function canonicalizePathSync(p: string): string {
         cur = parent;
         continue;
       }
-      // Existing non-symlink: realpath expands 8.3 on Windows.
-      const real = realpathSync(cur);
+      // Existing non-symlink: native realpath expands Windows 8.3 short names
+      // (JS realpathSync alone often does not).
+      const real = realpathSync.native(cur);
       return suffix.length === 0 ? real : path.join(real, ...suffix);
     } catch {
       suffix.unshift(path.basename(cur));

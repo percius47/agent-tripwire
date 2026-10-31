@@ -1,10 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  writeFile,
+} from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   parseClaudeCodeLine,
   createClaudeCodeAdapter,
+  claudeCodeGlob,
 } from "../src/adapters/claude-code.js";
 import {
   buildExcludeBlock,
@@ -13,13 +22,23 @@ import {
   isIgnored,
   writeExcludeBlock,
 } from "../src/git-exclude.js";
-import { deriveWatchRoot, minimatchSimple } from "../src/glob-util.js";
+import {
+  deriveWatchRoot,
+  expandGlob,
+  minimatchSimple,
+} from "../src/glob-util.js";
 import { runInit } from "../src/init.js";
 import { buildTokenMatcher } from "../src/match.js";
 import { loadManifest } from "../src/manifest.js";
 import { processFile, createSeenMap } from "../src/engine.js";
 import { loadOffsets } from "../src/offsets.js";
+import {
+  canonicalizePathSync,
+  pathsEqual,
+} from "../src/path-util.js";
+import { runRemove } from "../src/remove.js";
 import { readNewLines } from "../src/tail.js";
+import { startWatch } from "../src/watch.js";
 import {
   initGitRepo,
   makeTempHome,
@@ -184,6 +203,118 @@ describe("CRLF handling", () => {
       restore();
     }
   });
+});
+
+describe("Windows 8.3 short-name canonicalization", () => {
+  it.skipIf(process.platform !== "win32")(
+    "canonicalizePathSync / pathsEqual expand raw os.tmpdir() 8.3 names",
+    () => {
+      // Intentionally do NOT realpath first — makeTempHome masks this bug.
+      const rawTmp = os.tmpdir();
+      const longTmp = realpathSync.native(rawTmp);
+      expect(canonicalizePathSync(rawTmp).toLowerCase()).toBe(
+        longTmp.toLowerCase(),
+      );
+      expect(pathsEqual(rawTmp, longTmp)).toBe(true);
+      if (rawTmp.includes("~")) {
+        expect(canonicalizePathSync(rawTmp)).not.toMatch(/~/);
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "remove sameProject matches when projectRoot is the raw short temp path",
+    async () => {
+      // Raw mkdtemp keeps 8.3 form when os.tmpdir() is short (no realpath).
+      const rawHome = await mkdtemp(path.join(os.tmpdir(), "tripwire-home-"));
+      const longHome = realpathSync.native(rawHome);
+      const restore = useHome(rawHome);
+      try {
+        const projectLong = path.join(longHome, "projects", "demo");
+        await mkdir(projectLong, { recursive: true });
+        await initGitRepo(projectLong);
+        const planted = await runInit({ projectRoot: projectLong });
+        expect(planted.project.created).toHaveLength(3);
+
+        const projectShort = path.join(rawHome, "projects", "demo");
+        // Exercise remove.ts sameProject via pathsEqual(short, long).
+        const report = await runRemove({ projectRoot: projectShort });
+        expect(report.deleted).toHaveLength(3);
+        expect(report.keptModified).toHaveLength(0);
+      } finally {
+        restore();
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "expandGlob + startWatch fire a hit under HOME path with a space",
+    { timeout: 20_000 },
+    async () => {
+      const home = await makeTempHome();
+      const spaced = path.join(home, "Name With Space");
+      await mkdir(spaced, { recursive: true });
+      const restore = useHome(spaced);
+      let handle: Awaited<ReturnType<typeof startWatch>> | undefined;
+      try {
+        const project = await makeTempProject(spaced);
+        const planted = await runInit({ projectRoot: project });
+        const tokenId = planted.project.created[0]?.tokenId;
+        if (!tokenId) throw new Error("missing token");
+
+        const dir = path.join(
+          spaced,
+          ".claude",
+          "projects",
+          "C--Users-Name With Space-LAMP",
+        );
+        await mkdir(dir, { recursive: true });
+        const file = path.join(dir, "sess-watch-space.jsonl");
+        await writeFile(file, "", "utf8");
+
+        const matched = await expandGlob(claudeCodeGlob(spaced));
+        expect(matched.some((f) => pathsEqual(f, file))).toBe(true);
+
+        const hits: string[] = [];
+        handle = await startWatch({
+          adapters: [createClaudeCodeAdapter(spaced)],
+          initialScan: false,
+          onHit: (h) => {
+            hits.push(h.tokenId);
+          },
+        });
+        await handle.ready;
+
+        await appendFile(
+          file,
+          `${JSON.stringify({
+            type: "user",
+            sessionId: "sess-watch-space",
+            timestamp: "2026-10-31T12:00:00.000Z",
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  content: `AWS_ACCESS_KEY_ID=${tokenId}\n`,
+                },
+              ],
+            },
+            toolUseResult: { content: `AWS_ACCESS_KEY_ID=${tokenId}\n` },
+          })}\n`,
+          "utf8",
+        );
+
+        const deadline = Date.now() + 10_000;
+        while (hits.length === 0 && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        expect(hits).toEqual([tokenId]);
+      } finally {
+        await handle?.close();
+        restore();
+      }
+    },
+  );
 });
 
 describe("Claude Code Windows-confirmed fixture", () => {
