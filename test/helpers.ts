@@ -1,10 +1,11 @@
-import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, realpath } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
 
 export async function makeTempHome(): Promise<string> {
-  return mkdtemp(path.join(os.tmpdir(), "tripwire-home-"));
+  // realpath expands Windows 8.3 short names so paths match git toplevel.
+  return realpath(await mkdtemp(path.join(os.tmpdir(), "tripwire-home-")));
 }
 
 /** Project dir without pre-creating config/ (so createdDirs can be recorded). */

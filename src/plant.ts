@@ -11,7 +11,7 @@ import {
   type Manifest,
 } from "./manifest.js";
 import { getHomeDir } from "./paths.js";
-import { pathKey } from "./path-util.js";
+import { canonicalizePathSync, pathKey, pathsEqual } from "./path-util.js";
 
 export interface PlantResult {
   created: DecoyRecord[];
@@ -172,16 +172,21 @@ export async function plantOne(
   await fsp.chmod(plan.path, PRIVATE_FILE_MODE);
 
   const record: DecoyRecord = {
-    path: plan.path,
+    path: canonicalizePathSync(plan.path),
     sha256: sha256(content),
     tokenId,
     matchValues: [...new Set(matchValues.length > 0 ? matchValues : [tokenId])],
     createdAt: new Date().toISOString(),
     scope: plan.scope,
-    ...(projectRoot !== undefined ? { projectRoot } : {}),
+    ...(projectRoot !== undefined
+      ? { projectRoot: canonicalizePathSync(projectRoot) }
+      : {}),
   };
 
-  return { record, createdDirs };
+  return {
+    record,
+    createdDirs: createdDirs.map((d) => canonicalizePathSync(d)),
+  };
 }
 
 export async function plantPlans(

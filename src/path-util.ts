@@ -1,12 +1,49 @@
+import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 /**
+ * Expand Windows 8.3 short names (e.g. `RUNNER~1` → `runneradmin`) without
+ * following symlinks. Leaf / intermediate symlinks stay as path segments so
+ * plant-safety checks do not confuse `.env.backup` → `.env` with the real
+ * credential file.
+ */
+export function canonicalizePathSync(p: string): string {
+  const resolved = path.resolve(p);
+  const suffix: string[] = [];
+  let cur = resolved;
+  for (;;) {
+    try {
+      const st = lstatSync(cur);
+      if (st.isSymbolicLink()) {
+        suffix.unshift(path.basename(cur));
+        const parent = path.dirname(cur);
+        if (parent === cur) {
+          return suffix.length === 0 ? resolved : path.join(resolved, ...suffix);
+        }
+        cur = parent;
+        continue;
+      }
+      // Existing non-symlink: realpath expands 8.3 on Windows.
+      const real = realpathSync(cur);
+      return suffix.length === 0 ? real : path.join(real, ...suffix);
+    } catch {
+      suffix.unshift(path.basename(cur));
+      const parent = path.dirname(cur);
+      if (parent === cur) {
+        return path.join(cur, ...suffix);
+      }
+      cur = parent;
+    }
+  }
+}
+
+/**
  * Path key for equality / prefix checks.
- * Windows paths are compared case-insensitively (NTFS); drive letter case
- * from git vs Node otherwise breaks startsWith / Set lookups.
+ * Windows: canonicalize (8.3, no symlink follow) + case-fold so git long
+ * paths and Node short temp paths compare equal.
  */
 export function pathKey(p: string): string {
-  const resolved = path.resolve(p);
+  const resolved = canonicalizePathSync(p);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 

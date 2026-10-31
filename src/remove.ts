@@ -20,6 +20,7 @@ import {
   getOffsetsPath,
   getStateDir,
 } from "./paths.js";
+import { isPathInside, pathsEqual } from "./path-util.js";
 import { sha256 } from "./plant.js";
 
 export interface RemoveOptions {
@@ -44,12 +45,11 @@ export interface RemoveReport {
 function sameProject(record: DecoyRecord, projectRoot: string): boolean {
   if (record.scope !== "project") return false;
   if (!record.projectRoot) return false;
-  return path.resolve(record.projectRoot) === path.resolve(projectRoot);
+  return pathsEqual(record.projectRoot, projectRoot);
 }
 
 function isUnder(root: string, candidate: string): boolean {
-  const rel = path.relative(path.resolve(root), path.resolve(candidate));
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  return isPathInside(root, candidate);
 }
 
 async function fileSha256(filePath: string): Promise<string | null> {
@@ -125,7 +125,7 @@ async function maybeClearStateDir(manifest: Manifest): Promise<{
 export async function runRemove(
   options: RemoveOptions = {},
 ): Promise<RemoveReport> {
-  const cwd = path.resolve(options.projectRoot ?? process.cwd());
+  const cwd = options.projectRoot ?? process.cwd();
   const { projectRoot } = resolveProjectRoot(cwd);
   const includeHome = options.home === true;
   const dryRun = options.dryRun === true;
@@ -208,7 +208,7 @@ export async function runRemove(
         (d) =>
           d.scope === "project" &&
           d.projectRoot !== undefined &&
-          path.resolve(d.projectRoot) === path.resolve(projectRoot),
+          pathsEqual(d.projectRoot, projectRoot),
       );
       if (!dryRun) {
         if (remainingForRepo.length === 0) {

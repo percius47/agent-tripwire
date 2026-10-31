@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { pathsEqual } from "./path-util.js";
+import { canonicalizePathSync, pathsEqual } from "./path-util.js";
 
 export const EXCLUDE_BEGIN = "# >>> agent-tripwire";
 export const EXCLUDE_END = "# <<< agent-tripwire";
@@ -50,8 +50,9 @@ export function isGitRepo(dir: string): boolean {
 export function gitTopLevel(dir: string): string | null {
   const r = runGit(dir, ["rev-parse", "--show-toplevel"]);
   if (r.status !== 0) return null;
-  // Git-for-Windows often prints forward slashes / lowercase drive letters.
-  return path.resolve(r.stdout.trim());
+  // Git-for-Windows often prints forward slashes / long paths; Node temp
+  // dirs may use 8.3 short names — canonicalize so they match.
+  return canonicalizePathSync(r.stdout.trim());
 }
 
 export function excludeFilePath(repoRoot: string): string {
@@ -163,7 +164,10 @@ export async function stripExcludeBlock(repoRoot: string): Promise<boolean> {
 }
 
 export function toRepoRelative(repoRoot: string, absolutePath: string): string {
-  const rel = path.relative(repoRoot, absolutePath);
+  const rel = path.relative(
+    canonicalizePathSync(repoRoot),
+    canonicalizePathSync(absolutePath),
+  );
   // git exclude / check-ignore prefer forward slashes
   return rel.split(path.sep).join("/");
 }
@@ -176,7 +180,7 @@ export function resolveProjectRoot(cwd: string): {
   fromSubdir: boolean;
   gitRepo: boolean;
 } {
-  const resolved = path.resolve(cwd);
+  const resolved = canonicalizePathSync(cwd);
   if (!isGitRepo(resolved)) {
     return { projectRoot: resolved, fromSubdir: false, gitRepo: false };
   }
@@ -184,7 +188,6 @@ export function resolveProjectRoot(cwd: string): {
   if (!top) {
     return { projectRoot: resolved, fromSubdir: false, gitRepo: true };
   }
-  const topResolved = path.resolve(top);
-  const fromSubdir = !pathsEqual(topResolved, resolved);
-  return { projectRoot: topResolved, fromSubdir, gitRepo: true };
+  const fromSubdir = !pathsEqual(top, resolved);
+  return { projectRoot: top, fromSubdir, gitRepo: true };
 }

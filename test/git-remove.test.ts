@@ -27,6 +27,7 @@ import {
   writeFixture,
   readExact,
 } from "./helpers.js";
+import { pathsEqual } from "../src/path-util.js";
 
 function git(cwd: string, args: string[]): string {
   const r = spawnSync("git", args, {
@@ -152,7 +153,7 @@ describe("git safety", () => {
       await mkdir(sub, { recursive: true });
 
       const report = await runInit({ projectRoot: sub });
-      expect(report.projectRoot).toBe(project);
+      expect(pathsEqual(report.projectRoot, project)).toBe(true);
       expect(report.notes.some((n) => /git toplevel/i.test(n))).toBe(true);
       await access(path.join(project, ".env.backup"));
     } finally {
@@ -238,7 +239,11 @@ describe("remove", () => {
       expect(remove1.deleted.length).toBe(3);
       expect(remove1.keptModified).toHaveLength(0);
       expect(remove1.excludeStripped).toBe(true);
-      expect(remove1.removedDirs).toContain(path.join(project, "config"));
+      expect(
+        remove1.removedDirs.some((d) =>
+          pathsEqual(d, path.join(project, "config")),
+        ),
+      ).toBe(true);
 
       await expect(
         access(path.join(project, ".env.backup")),
@@ -266,14 +271,14 @@ describe("remove", () => {
       await writeFile(decoy, "MODIFIED_BY_USER\n", "utf8");
 
       const report = await runRemove({ projectRoot: project });
-      expect(report.keptModified).toEqual(
-        expect.arrayContaining([expect.objectContaining({ path: decoy })]),
-      );
+      expect(
+        report.keptModified.some((k) => pathsEqual(k.path, decoy)),
+      ).toBe(true);
       expect(await readFile(decoy, "utf8")).toBe("MODIFIED_BY_USER\n");
       expect(report.deleted.length).toBe(2);
 
       const manifest = await loadManifest();
-      expect(manifest.decoys.some((d) => d.path === decoy)).toBe(true);
+      expect(manifest.decoys.some((d) => pathsEqual(d.path, decoy))).toBe(true);
     } finally {
       restore();
     }
