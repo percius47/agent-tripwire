@@ -5,11 +5,13 @@ import {
   appendHit,
   buildHitSnippet,
   hitDedupeKey,
+  hitStrength,
   loadHits,
   seedSeenFromHits,
   type HitKind,
   type HitRecord,
   type HitSignal,
+  type SeenBag,
 } from "./hits.js";
 import { loadManifest, type DecoyRecord } from "./manifest.js";
 import { buildTokenMatcher, type TokenMatcher } from "./match.js";
@@ -22,6 +24,7 @@ import {
 import {
   findDecoyForToolPath,
   findDecoyMentionedInCommand,
+  type TranscriptProjectContext,
 } from "./path-match.js";
 import { getStateDir } from "./paths.js";
 import { isPathInside, pathsEqual } from "./path-util.js";
@@ -45,8 +48,11 @@ export interface ProcessFileOptions {
   /** Active decoys — used for path/shell matching (default []). */
   decoys?: DecoyRecord[];
   offsets: OffsetsState;
-  /** adapter+sourceFile+sessionId → set of tokenIds already alerted. */
-  seen: Map<string, Set<string>>;
+  /**
+   * adapter+sourceFile+sessionId → tokenId → strongest kind already alerted.
+   * Token proof (`read`/`seen`) may upgrade an earlier path-only attempt.
+   */
+  seen: SeenBag;
   /** When true, persist offsets after this file. */
   persistOffsets?: boolean;
   /**
@@ -77,10 +83,11 @@ interface ResolvedPathHit {
 function resolvePathSignal(
   signal: PathSignal,
   decoys: DecoyRecord[],
+  ctx: TranscriptProjectContext,
 ): ResolvedPathHit | null {
   if (signal.kind === "shell-mention") {
     if (typeof signal.command !== "string") return null;
-    const decoy = findDecoyMentionedInCommand(signal.command, decoys);
+    const decoy = findDecoyMentionedInCommand(signal.command, decoys, ctx);
     if (!decoy) return null;
     const out: ResolvedPathHit = {
       kind: "shell-mention",
@@ -91,7 +98,7 @@ function resolvePathSignal(
     return out;
   }
   if (typeof signal.toolPath !== "string") return null;
-  const decoy = findDecoyForToolPath(signal.toolPath, decoys);
+  const decoy = findDecoyForToolPath(signal.toolPath, decoys, ctx);
   if (!decoy) return null;
   const out: ResolvedPathHit = {
     kind: signal.kind,
@@ -112,6 +119,14 @@ interface PendingPath {
   timestampHint: string;
 }
 
+function isPathOnlyKind(kind: HitKind): boolean {
+  return (
+    kind === "read-attempt" ||
+    kind === "write-attempt" ||
+    kind === "shell-mention"
+  );
+}
+
 /**
  * Process new bytes for one log file. Updates offsets in-place.
  * Returns newly recorded hits (after adapter+sourceFile+session dedupe).
@@ -119,7 +134,8 @@ interface PendingPath {
  * Token matches and path signals are merged per decoy on the same line
  * (prefer token kind; record both signals). Path signals that share a
  * tool_use id with a later token match in the same processFile batch are
- * merged into one token hit.
+ * merged into one token hit. Across batches (live watch), a token hit
+ * upgrades a weaker path-only hit for the same tokenId.
  */
 export async function processFile(
   opts: ProcessFileOptions,
@@ -160,9 +176,21 @@ export async function processFile(
     const key = hitDedupeKey(adapter.id, abs, args.session);
     let bag = seen.get(key);
     if (!bag) {
-      bag = new Set();
+      bag = new Map();
       seen.set(key, bag);
     }
+    const prevKind = bag.get(args.tokenId);
+    const signals = [...args.signals];
+    // Upgrading a path-only row: keep both signals on the stronger alert.
+    if (
+      prevKind &&
+      isPathOnlyKind(prevKind) &&
+      hitStrength(args.kind) > hitStrength(prevKind) &&
+      !signals.includes("path")
+    ) {
+      signals.push("path");
+    }
+
     const base: HitRecord = {
       at: new Date().toISOString(),
       tokenId: args.tokenId,
@@ -173,17 +201,21 @@ export async function processFile(
       sourceFile: abs,
       decoyPath: args.decoyPath,
       snippet: args.snippet,
-      signals: args.signals,
+      signals,
     };
     if (args.toolUseId) base.toolUseId = args.toolUseId;
 
-    if (bag.has(args.tokenId)) {
-      if (opts.includeKnown) {
-        hits.push({ ...base, alertLine: formatAlert(base), isNew: false });
+    if (prevKind !== undefined) {
+      if (hitStrength(args.kind) <= hitStrength(prevKind)) {
+        if (opts.includeKnown) {
+          hits.push({ ...base, alertLine: formatAlert(base), isNew: false });
+        }
+        return;
       }
-      return;
+      // Stronger kind: upgrade — append + alert again.
     }
-    bag.add(args.tokenId);
+
+    bag.set(args.tokenId, args.kind);
     await appendHit(base);
     hits.push({ ...base, alertLine: formatAlert(base), isNew: true });
   };
@@ -193,10 +225,14 @@ export async function processFile(
     if (!parsed) continue;
     const session = parsed.sessionId || "unknown";
     const tokenMatches = matcher.findAll(parsed.text);
+    const projectCtx: TranscriptProjectContext = {
+      adapterId: adapter.id,
+    };
+    if (parsed.projectHint) projectCtx.projectHint = parsed.projectHint;
 
     const pathResolved: ResolvedPathHit[] = [];
     for (const sig of parsed.pathSignals ?? []) {
-      const r = resolvePathSignal(sig, decoys);
+      const r = resolvePathSignal(sig, decoys, projectCtx);
       if (r) pathResolved.push(r);
     }
 
@@ -226,8 +262,15 @@ export async function processFile(
         }
       }
 
+      // Also treat a weaker kind already in the seen bag as a path signal
+      // (cross-batch upgrade after watch delivered tool_use separately).
+      const key = hitDedupeKey(adapter.id, abs, session);
+      const priorKind = seen.get(key)?.get(m.tokenId);
+
       const signals: HitSignal[] = ["token"];
-      if (pathHit || pending) signals.push("path");
+      if (pathHit || pending || (priorKind && isPathOnlyKind(priorKind))) {
+        signals.push("path");
+      }
 
       const kind: HitKind = parsed.isToolResult ? "read" : "seen";
       const label = formatTokenLabel(m.tokenId);
@@ -359,7 +402,7 @@ export async function runScanPass(
   const seedFromHits = options.seedFromHits !== false;
   const seen = seedFromHits
     ? seedSeenFromHits(await loadHits())
-    : new Map<string, Set<string>>();
+    : createSeenMap();
   const allHits: EngineHit[] = [];
   const includeKnown = options.includeKnown === true;
 
@@ -387,7 +430,7 @@ export async function runScanPass(
   return { hits: allHits, hitCount: allHits.length };
 }
 
-export function createSeenMap(): Map<string, Set<string>> {
+export function createSeenMap(): SeenBag {
   return new Map();
 }
 

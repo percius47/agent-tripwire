@@ -44,6 +44,29 @@ export function hitDedupeKey(
   return `${adapter}\0${sourceFile}\0${sessionId}`;
 }
 
+/**
+ * Strength for upgrade/dedupe: token proof (`read`/`seen`) beats path attempts,
+ * which beat `shell-mention`. A stronger hit for the same tokenId must still
+ * alert (watch delivers tool_use and tool_result in separate batches).
+ */
+export function hitStrength(kind: HitKind): number {
+  switch (kind) {
+    case "read":
+    case "seen":
+      return 3;
+    case "read-attempt":
+    case "write-attempt":
+      return 2;
+    case "shell-mention":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/** adapter+file+session → tokenId → strongest kind recorded so far. */
+export type SeenBag = Map<string, Map<string, HitKind>>;
+
 /** Load all hit records from hits.jsonl (missing file → []). */
 export async function loadHits(): Promise<HitRecord[]> {
   try {
@@ -77,19 +100,24 @@ export async function loadHits(): Promise<HitRecord[]> {
   }
 }
 
-/** Seed in-memory dedupe from persisted hits (tokenId per adapter/file/session). */
-export function seedSeenFromHits(
-  hits: HitRecord[],
-): Map<string, Set<string>> {
-  const seen = new Map<string, Set<string>>();
+/**
+ * Seed in-memory dedupe from persisted hits (strongest kind per tokenId per
+ * adapter/file/session). Path-only rows must not permanently block a later
+ * token `read` upgrade after a watch restart.
+ */
+export function seedSeenFromHits(hits: HitRecord[]): SeenBag {
+  const seen: SeenBag = new Map();
   for (const h of hits) {
     const key = hitDedupeKey(h.adapter, h.sourceFile, h.sessionId);
     let bag = seen.get(key);
     if (!bag) {
-      bag = new Set();
+      bag = new Map();
       seen.set(key, bag);
     }
-    bag.add(h.tokenId);
+    const prev = bag.get(h.tokenId);
+    if (!prev || hitStrength(h.kind) > hitStrength(prev)) {
+      bag.set(h.tokenId, h.kind);
+    }
   }
   return seen;
 }

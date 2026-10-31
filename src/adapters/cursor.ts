@@ -1,4 +1,5 @@
 import path from "node:path";
+import { cursorProjectSlugFromLogPath } from "../path-match.js";
 import { getHomeDir } from "../paths.js";
 import type { LogAdapter, ParsedLine, PathSignal } from "./types.js";
 
@@ -158,27 +159,32 @@ export function parseCursorLine(
   if (trimmed.length === 0) return null;
 
   const sessionId = sessionIdFromFile(filePath);
+  const projectHint = cursorProjectSlugFromLogPath(filePath);
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    return {
+    const fallback: ParsedLine = {
       tool: "cursor",
       sessionId,
       timestamp: "",
       text: trimmed,
       isToolResult: false,
     };
+    if (projectHint) fallback.projectHint = projectHint;
+    return fallback;
   }
 
   if (parsed === null || typeof parsed !== "object") {
-    return {
+    const fallback: ParsedLine = {
       tool: "cursor",
       sessionId,
       timestamp: "",
       text: trimmed,
       isToolResult: false,
     };
+    if (projectHint) fallback.projectHint = projectHint;
+    return fallback;
   }
 
   const obj = parsed as Record<string, unknown>;
@@ -194,6 +200,7 @@ export function parseCursorLine(
     // Cursor never logs tool_result / file contents.
     isToolResult: false,
   };
+  if (projectHint) result.projectHint = projectHint;
   if (pathSignals.length > 0) result.pathSignals = pathSignals;
   return result;
 }

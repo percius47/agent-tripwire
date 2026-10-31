@@ -37,6 +37,12 @@ export interface ParsedLine {
    * deduping a path attempt with a later token read).
    */
   toolUseId?: string;
+  /**
+   * Transcript project identity for path/shell scoping.
+   * Cursor: project slug from the log path.
+   * Claude Code: record `cwd` when present, else mangled projects/ slug.
+   */
+  projectHint?: string;
 }
 
 export interface LogAdapter {

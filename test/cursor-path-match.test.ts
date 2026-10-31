@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   createClaudeCodeAdapter,
@@ -21,9 +21,16 @@ import { loadManifest, type DecoyRecord } from "../src/manifest.js";
 import { buildTokenMatcher } from "../src/match.js";
 import { loadOffsets } from "../src/offsets.js";
 import {
+  appendHit,
+  loadHits,
+  seedSeenFromHits,
+} from "../src/hits.js";
+import {
   commandMentionsDecoy,
   findDecoyForToolPath,
+  findDecoyMentionedInCommand,
   pathRefersToDecoy,
+  toCursorProjectSlug,
 } from "../src/path-match.js";
 import { formatRemoveReport, runRemove } from "../src/remove.js";
 import { formatTokenLabel } from "../src/token-label.js";
@@ -114,7 +121,7 @@ describe("path matcher", () => {
     }
   });
 
-  it("shell command mentions basename / relative path", () => {
+  it("shell command mentions basename / relative path with boundaries", () => {
     const decoy: DecoyRecord = {
       path: path.join("/proj", "config", "secrets.legacy.json"),
       sha256: "abc",
@@ -127,6 +134,14 @@ describe("path matcher", () => {
       commandMentionsDecoy("cat config/secrets.legacy.json", decoy),
     ).toBe(true);
     expect(commandMentionsDecoy("echo hello", decoy)).toBe(false);
+    expect(commandMentionsDecoy("cat .env.backup.example", {
+      ...decoy,
+      path: path.join("/proj", ".env.backup"),
+    })).toBe(false);
+    expect(commandMentionsDecoy("echo foo.env.backup", {
+      ...decoy,
+      path: path.join("/proj", ".env.backup"),
+    })).toBe(false);
   });
 
   it("win32 path compare is case-insensitive", () => {
@@ -198,11 +213,8 @@ describe("Cursor adapter", () => {
       const matcher = buildTokenMatcher(decoys);
       const adapter = createCursorAdapter(home);
       const sessionId = "11111111-2222-4333-8444-555555555555";
-      const file = cursorSessionFile(
-        home,
-        "c-Users-demo-Documents-GitHub-demo",
-        sessionId,
-      );
+      const slug = toCursorProjectSlug(project);
+      const file = cursorSessionFile(home, slug, sessionId);
       await mkdir(path.dirname(file), { recursive: true });
 
       // Also drop non-jsonl siblings that must be ignored by the glob.
@@ -252,11 +264,7 @@ describe("Cursor adapter", () => {
       // Shell-mention in a separate session (same decoy tokenId would
       // otherwise dedupe against the read-attempt above).
       const shellSession = "22222222-3333-4444-8555-666666666666";
-      const shellFile = cursorSessionFile(
-        home,
-        "c-Users-demo-Documents-GitHub-demo",
-        shellSession,
-      );
+      const shellFile = cursorSessionFile(home, slug, shellSession);
       await mkdir(path.dirname(shellFile), { recursive: true });
       await writeFile(
         shellFile,
@@ -571,6 +579,326 @@ describe("Claude path matching + dedupe", () => {
   });
 });
 
+describe("cross-batch token upgrade (live watch)", () => {
+  it("tool_use then tool_result in separate processFile calls upgrades to read", async () => {
+    const home = await makeTempHome();
+    const restore = useHome(home);
+    try {
+      const project = await makeTempProject(home);
+      await initGitRepo(project);
+      const report = await runInit({ projectRoot: project });
+      const decoy = report.project.created.find((d) =>
+        d.path.endsWith(".env.backup"),
+      );
+      if (!decoy) throw new Error("missing decoy");
+      const decoys = (await loadManifest()).decoys;
+      const adapter = createClaudeCodeAdapter(home);
+      const matcher = buildTokenMatcher(decoys);
+      const toolUseId = "toolu_live_upgrade";
+
+      const dir = path.join(home, ".claude", "projects", "-live-upgrade");
+      await mkdir(dir, { recursive: true });
+      const file = path.join(dir, "sess-live.jsonl");
+      await writeFile(file, "", "utf8");
+
+      const offsets = await loadOffsets();
+      const seen = createSeenMap();
+
+      await appendFile(
+        file,
+        `${JSON.stringify({
+          type: "assistant",
+          sessionId: "sess-live",
+          cwd: project,
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: toolUseId,
+                name: "Read",
+                input: { file_path: decoy.path },
+              },
+            ],
+          },
+        })}\n`,
+        "utf8",
+      );
+
+      const first = await processFile({
+        filePath: file,
+        adapter,
+        matcher,
+        decoys,
+        offsets,
+        seen,
+      });
+      expect(first).toHaveLength(1);
+      expect(first[0]?.kind).toBe("read-attempt");
+      expect(first[0]?.isNew).toBe(true);
+
+      await appendFile(
+        file,
+        `${JSON.stringify({
+          type: "user",
+          sessionId: "sess-live",
+          cwd: project,
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: toolUseId,
+                content: `AWS_ACCESS_KEY_ID=${decoy.tokenId}\n`,
+              },
+            ],
+          },
+          toolUseResult: {
+            content: `AWS_ACCESS_KEY_ID=${decoy.tokenId}\n`,
+          },
+        })}\n`,
+        "utf8",
+      );
+
+      const second = await processFile({
+        filePath: file,
+        adapter,
+        matcher,
+        decoys,
+        offsets,
+        seen,
+      });
+      expect(second).toHaveLength(1);
+      expect(second[0]?.kind).toBe("read");
+      expect(second[0]?.isNew).toBe(true);
+      expect(second[0]?.signals?.sort()).toEqual(["path", "token"]);
+      expect(second[0]?.alertLine).toContain("read decoy");
+      expect(second[0]?.alertLine).not.toContain(decoy.tokenId);
+
+      const persisted = await loadHits();
+      const kinds = persisted
+        .filter((h) => h.tokenId === decoy.tokenId)
+        .map((h) => h.kind);
+      expect(kinds).toContain("read-attempt");
+      expect(kinds).toContain("read");
+    } finally {
+      restore();
+    }
+  });
+
+  it("seeded path-only hits still allow a later token read upgrade", async () => {
+    const home = await makeTempHome();
+    const restore = useHome(home);
+    try {
+      const project = await makeTempProject(home);
+      await initGitRepo(project);
+      const report = await runInit({ projectRoot: project });
+      const decoy = report.project.created.find((d) =>
+        d.path.endsWith(".env.backup"),
+      );
+      if (!decoy) throw new Error("missing decoy");
+      const decoys = (await loadManifest()).decoys;
+
+      const sourceFile = path.join(
+        home,
+        ".claude",
+        "projects",
+        "-restart",
+        "sess.jsonl",
+      );
+      await appendHit({
+        at: new Date().toISOString(),
+        tokenId: decoy.tokenId,
+        kind: "read-attempt",
+        adapter: "claude-code",
+        tool: "claude-code",
+        sessionId: "sess-restart",
+        sourceFile: path.resolve(sourceFile),
+        decoyPath: decoy.path,
+        snippet: decoy.path,
+        signals: ["path"],
+      });
+
+      await mkdir(path.dirname(sourceFile), { recursive: true });
+      await writeFile(
+        sourceFile,
+        `${JSON.stringify({
+          type: "user",
+          sessionId: "sess-restart",
+          cwd: project,
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_restart",
+                content: `KEY=${decoy.tokenId}\n`,
+              },
+            ],
+          },
+          toolUseResult: { content: `KEY=${decoy.tokenId}\n` },
+        })}\n`,
+        "utf8",
+      );
+
+      const seen = seedSeenFromHits(await loadHits());
+      const hits = await processFile({
+        filePath: sourceFile,
+        adapter: createClaudeCodeAdapter(home),
+        matcher: buildTokenMatcher(decoys),
+        decoys,
+        offsets: await loadOffsets(),
+        seen,
+      });
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.kind).toBe("read");
+      expect(hits[0]?.signals?.sort()).toEqual(["path", "token"]);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("shell-mention scoping and boundaries", () => {
+  async function plantCursorShellFixture(): Promise<{
+    home: string;
+    restore: () => void;
+    project: string;
+    decoys: DecoyRecord[];
+    slug: string;
+    adapter: ReturnType<typeof createCursorAdapter>;
+    matcher: ReturnType<typeof buildTokenMatcher>;
+  }> {
+    const home = await makeTempHome();
+    const restore = useHome(home);
+    const project = await makeTempProject(home);
+    await initGitRepo(project);
+    await runInit({ projectRoot: project });
+    const decoys = (await loadManifest()).decoys;
+    return {
+      home,
+      restore,
+      project,
+      decoys,
+      slug: toCursorProjectSlug(project),
+      adapter: createCursorAdapter(home),
+      matcher: buildTokenMatcher(decoys),
+    };
+  }
+
+  async function shellHits(
+    opts: {
+      home: string;
+      slug: string;
+      session: string;
+      command: string;
+      decoys: DecoyRecord[];
+      adapter: ReturnType<typeof createCursorAdapter>;
+      matcher: ReturnType<typeof buildTokenMatcher>;
+    },
+  ) {
+    const file = cursorSessionFile(opts.home, opts.slug, opts.session);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      `${cursorAssistantToolUse("Shell", { command: opts.command })}\n`,
+      "utf8",
+    );
+    return processFile({
+      filePath: file,
+      adapter: opts.adapter,
+      matcher: opts.matcher,
+      decoys: opts.decoys,
+      offsets: await loadOffsets(),
+      seen: createSeenMap(),
+    });
+  }
+
+  it("echo .env.backup in an unrelated project gives no hit", async () => {
+    const fx = await plantCursorShellFixture();
+    try {
+      const hits = await shellHits({
+        ...fx,
+        slug: "c-Users-Other-Documents-OtherRepo",
+        session: "shell-unrelated-echo",
+        command: "echo .env.backup >> .gitignore",
+      });
+      expect(hits).toHaveLength(0);
+      expect(
+        findDecoyMentionedInCommand(
+          "echo .env.backup >> .gitignore",
+          fx.decoys,
+          {
+            adapterId: "cursor",
+            projectHint: "c-Users-Other-Documents-OtherRepo",
+          },
+        ),
+      ).toBeNull();
+    } finally {
+      fx.restore();
+    }
+  });
+
+  it("cat .env.backup.example gives no hit", async () => {
+    const fx = await plantCursorShellFixture();
+    try {
+      const hits = await shellHits({
+        ...fx,
+        session: "shell-example-suffix",
+        command: "cat .env.backup.example",
+      });
+      expect(hits).toHaveLength(0);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  it("rg .env.backup src/ in an unrelated project gives no hit", async () => {
+    const fx = await plantCursorShellFixture();
+    try {
+      const hits = await shellHits({
+        ...fx,
+        slug: "c-Users-Other-Unrelated",
+        session: "shell-unrelated-rg",
+        command: "rg .env.backup src/",
+      });
+      expect(hits).toHaveLength(0);
+    } finally {
+      fx.restore();
+    }
+  });
+
+  it("cat .env.backup in the decoy's own project is shell-mention", async () => {
+    const fx = await plantCursorShellFixture();
+    try {
+      const hits = await shellHits({
+        ...fx,
+        session: "shell-own-cat",
+        command: "cat .env.backup",
+      });
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.kind).toBe("shell-mention");
+    } finally {
+      fx.restore();
+    }
+  });
+
+  it("type config\\secrets.legacy.json in the decoy's project is a hit", async () => {
+    const fx = await plantCursorShellFixture();
+    try {
+      const hits = await shellHits({
+        ...fx,
+        session: "shell-own-type",
+        command: "type config\\secrets.legacy.json",
+      });
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.kind).toBe("shell-mention");
+      expect(hits[0]?.decoyPath.replace(/\\/g, "/")).toMatch(
+        /config\/secrets\.legacy\.json$/,
+      );
+    } finally {
+      fx.restore();
+    }
+  });
+});
+
 describe("remove cosmetic", () => {
   it("second remove does not claim Deleted for already-gone state files", async () => {
     const home = await makeTempHome();
@@ -594,3 +922,4 @@ describe("remove cosmetic", () => {
     }
   });
 });
+

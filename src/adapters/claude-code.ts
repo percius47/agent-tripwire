@@ -1,4 +1,5 @@
 import path from "node:path";
+import { claudeProjectSlugFromLogPath } from "../path-match.js";
 import { getHomeDir } from "../paths.js";
 import type { LogAdapter, ParsedLine, PathSignal } from "./types.js";
 
@@ -216,6 +217,9 @@ export function parseClaudeCodeLine(
         : sessionId;
 
   const pathSignals = extractPathSignals(obj);
+  const cwd = typeof obj.cwd === "string" ? obj.cwd : undefined;
+  const projectHint = cwd ?? claudeProjectSlugFromLogPath(filePath);
+
   const toolResultText = extractToolResultText(obj);
   if (toolResultText !== null) {
     const result: ParsedLine = {
@@ -227,6 +231,7 @@ export function parseClaudeCodeLine(
     };
     const toolUseId = extractToolUseIdFromResult(obj);
     if (toolUseId) result.toolUseId = toolUseId;
+    if (projectHint) result.projectHint = projectHint;
     if (pathSignals.length > 0) result.pathSignals = pathSignals;
     return result;
   }
@@ -240,6 +245,7 @@ export function parseClaudeCodeLine(
     text: text.length > 0 ? text : trimmed,
     isToolResult: false,
   };
+  if (projectHint) result.projectHint = projectHint;
   if (pathSignals.length > 0) result.pathSignals = pathSignals;
   return result;
 }

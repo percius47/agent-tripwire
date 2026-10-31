@@ -81,9 +81,16 @@ export {
   pathRefersToDecoy,
   findDecoyForToolPath,
   commandMentionsDecoy,
+  commandHasBoundedPathToken,
+  findDecoyMentionedInCommand,
   normalizeToolPathForCompare,
   decoyProjectRelative,
+  toCursorProjectSlug,
+  toClaudeProjectSlug,
+  decoyBelongsToTranscriptProject,
+  mapGitBashStylePath,
 } from "./path-match.js";
+export { hitStrength, type SeenBag } from "./hits.js";
 export { loadOffsets, saveOffsets, type OffsetsState } from "./offsets.js";
 export {
   appendHit,

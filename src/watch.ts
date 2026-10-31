@@ -485,7 +485,7 @@ export async function processWatchFileForTests(opts: {
   matcher: TokenMatcher;
   decoys?: import("./manifest.js").DecoyRecord[];
   offsets: OffsetsState;
-  seen: Map<string, Set<string>>;
+  seen: import("./hits.js").SeenBag;
 }): Promise<EngineHit[]> {
   return processFile({ ...opts, persistOffsets: true });
 }
