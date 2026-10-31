@@ -65,7 +65,8 @@ function cursorAssistantToolUse(
 
 describe("path matcher", () => {
   it("matches canonical absolute paths and project-relative suffixes", () => {
-    const projectRoot = path.resolve("/tmp/tripwire-path-match-proj");
+    // Use a native absolute root so canonicalize/resolve behave on win32.
+    const projectRoot = path.resolve(path.join("tripwire-path-match-proj"));
     const decoyPath = path.join(projectRoot, ".env.backup");
     const decoy: DecoyRecord = {
       path: decoyPath,
@@ -83,19 +84,34 @@ describe("path matcher", () => {
     expect(pathRefersToDecoy(".env.backup", decoy)).toBe(true);
     expect(pathRefersToDecoy("config/.env.backup", decoy)).toBe(true);
 
-    // Windows-shaped absolute path vs POSIX decoy (fixture / CI on Linux).
-    expect(
-      pathRefersToDecoy(
-        "C:\\Users\\Name\\Documents\\GitHub\\LAMP\\.env.backup",
-        decoy,
-      ),
-    ).toBe(true);
-    expect(
-      findDecoyForToolPath(
-        "C:\\Users\\Name\\Documents\\GitHub\\LAMP\\README.md",
-        [decoy],
-      ),
-    ).toBeNull();
+    // Same-root absolute with native separators (incl. backslash on win32).
+    const viaSep = [projectRoot, ".env.backup"].join(path.sep);
+    expect(pathRefersToDecoy(viaSep, decoy)).toBe(true);
+
+    // Foreign Windows absolute vs POSIX-shaped decoy root: only meaningful on
+    // non-win32 (on win32 both sides are Windows absolutes and must share a root).
+    if (process.platform !== "win32") {
+      expect(
+        pathRefersToDecoy(
+          "C:\\Users\\Name\\Documents\\GitHub\\LAMP\\.env.backup",
+          decoy,
+        ),
+      ).toBe(true);
+      expect(
+        findDecoyForToolPath(
+          "C:\\Users\\Name\\Documents\\GitHub\\LAMP\\README.md",
+          [decoy],
+        ),
+      ).toBeNull();
+    } else {
+      // Unrelated absolute path with the same basename must not match.
+      expect(
+        pathRefersToDecoy(
+          "C:\\Users\\Name\\Documents\\GitHub\\LAMP\\.env.backup",
+          decoy,
+        ),
+      ).toBe(false);
+    }
   });
 
   it("shell command mentions basename / relative path", () => {
@@ -285,6 +301,14 @@ describe("Cursor adapter", () => {
       const envDecoy = decoys.find((d) => d.path.endsWith(".env.backup"));
       if (!envDecoy) throw new Error("missing decoy");
 
+      // On win32 use the real decoy path (already backslash-separated). On
+      // POSIX, feed a foreign Windows absolute that shares the relative suffix
+      // (cross-platform fixture shape from the real Cursor log check).
+      const toolPath =
+        process.platform === "win32"
+          ? envDecoy.path
+          : "C:\\Users\\Name\\Documents\\GitHub\\LAMP\\.env.backup";
+
       const sessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
       const file = cursorSessionFile(
         home,
@@ -294,9 +318,7 @@ describe("Cursor adapter", () => {
       await mkdir(path.dirname(file), { recursive: true });
       await writeFile(
         file,
-        `${cursorAssistantToolUse("Read", {
-          path: "C:\\Users\\Name\\Documents\\GitHub\\LAMP\\.env.backup",
-        })}\n`,
+        `${cursorAssistantToolUse("Read", { path: toolPath })}\n`,
         "utf8",
       );
 
