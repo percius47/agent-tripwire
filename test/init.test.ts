@@ -6,7 +6,10 @@ import { runInit, formatInitReport } from "../src/init.js";
 import { loadManifest } from "../src/manifest.js";
 import { BANNED_PREFIXES, startsWithBannedPrefix } from "../src/token.js";
 import { formatTokenLabel } from "../src/token-label.js";
-import { PRIVATE_FILE_MODE } from "../src/fs-mode.js";
+import {
+  PRIVATE_FILE_MODE,
+  SUPPORTS_POSIX_FILE_MODES,
+} from "../src/fs-mode.js";
 import { getManifestPath } from "../src/paths.js";
 import {
   makeTempHome,
@@ -50,8 +53,10 @@ describe("init planting", () => {
         expect(c.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
         expect(c.scope).toBe("project");
         expect(c.projectRoot).toBe(project);
-        const mode = (await lstat(c.path)).mode & 0o777;
-        expect(mode).toBe(PRIVATE_FILE_MODE);
+        if (SUPPORTS_POSIX_FILE_MODES) {
+          const mode = (await lstat(c.path)).mode & 0o777;
+          expect(mode).toBe(PRIVATE_FILE_MODE);
+        }
       }
 
       // .env.local.old uses app_ro, not tripwire
@@ -65,8 +70,10 @@ describe("init planting", () => {
       const manifest = await loadManifest();
       expect(manifest.decoys).toHaveLength(3);
       expect(manifest.createdDirs).toContain(path.join(project, "config"));
-      const manMode = (await lstat(getManifestPath())).mode & 0o777;
-      expect(manMode).toBe(PRIVATE_FILE_MODE);
+      if (SUPPORTS_POSIX_FILE_MODES) {
+        const manMode = (await lstat(getManifestPath())).mode & 0o777;
+        expect(manMode).toBe(PRIVATE_FILE_MODE);
+      }
     } finally {
       restore();
     }
@@ -247,14 +254,39 @@ describe("init planting", () => {
 });
 
 describe("symlink safety", () => {
-  it("skips .env.backup symlink to real .env and leaves target byte-identical", async () => {
+  async function trySymlink(
+    target: string,
+    linkPath: string,
+  ): Promise<boolean> {
+    try {
+      await symlink(target, linkPath);
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      // Windows without Developer Mode / elevation cannot create symlinks.
+      if (
+        process.platform === "win32" &&
+        (code === "EPERM" || code === "EACCES" || code === "UNKNOWN")
+      ) {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  it("skips .env.backup symlink to real .env and leaves target byte-identical", async (ctx) => {
     const home = await makeTempHome();
     const restore = useHome(home);
     try {
       const project = await makeTempProject(home);
       const envPath = path.join(project, ".env");
       const envBefore = await writeFixture(envPath, "SECRET=real\n");
-      await symlink(envPath, path.join(project, ".env.backup"));
+      if (!(await trySymlink(envPath, path.join(project, ".env.backup")))) {
+        ctx.skip(
+          "Windows symlink fixture requires Developer Mode / elevation (POSIX symlink create)",
+        );
+        return;
+      }
 
       const report = await runInit({ projectRoot: project });
       expect(report.project.skipped).toEqual(
@@ -271,13 +303,20 @@ describe("symlink safety", () => {
     }
   });
 
-  it("skips a dangling .env.backup symlink", async () => {
+  it("skips a dangling .env.backup symlink", async (ctx) => {
     const home = await makeTempHome();
     const restore = useHome(home);
     try {
       const project = await makeTempProject(home);
       const dangling = path.join(project, ".env.backup");
-      await symlink(path.join(project, "does-not-exist.env"), dangling);
+      if (
+        !(await trySymlink(path.join(project, "does-not-exist.env"), dangling))
+      ) {
+        ctx.skip(
+          "Windows symlink fixture requires Developer Mode / elevation (POSIX symlink create)",
+        );
+        return;
+      }
 
       const report = await runInit({ projectRoot: project });
       expect(report.project.skipped).toEqual(
@@ -295,14 +334,19 @@ describe("symlink safety", () => {
     }
   });
 
-  it("refuses a config/ dir that is a symlink pointing outside the project", async () => {
+  it("refuses a config/ dir that is a symlink pointing outside the project", async (ctx) => {
     const home = await makeTempHome();
     const restore = useHome(home);
     try {
       const project = await makeTempProject(home);
       const outside = path.join(home, "outside-config");
       await mkdir(outside, { recursive: true });
-      await symlink(outside, path.join(project, "config"));
+      if (!(await trySymlink(outside, path.join(project, "config")))) {
+        ctx.skip(
+          "Windows symlink fixture requires Developer Mode / elevation (POSIX symlink create)",
+        );
+        return;
+      }
 
       await expect(runInit({ projectRoot: project })).rejects.toThrow(
         /symlink pointing outside/i,

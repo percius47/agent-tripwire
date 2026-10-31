@@ -19,6 +19,7 @@ import {
   type OffsetsState,
 } from "./offsets.js";
 import { getStateDir } from "./paths.js";
+import { isPathInside, pathsEqual } from "./path-util.js";
 import { formatTokenLabel } from "./token-label.js";
 import { readNewLines } from "./tail.js";
 
@@ -72,7 +73,7 @@ export async function processFile(
 
   // Never scan Tripwire's own state dir (avoids false hits on our files).
   const stateDir = path.resolve(getStateDir());
-  if (abs === stateDir || abs.startsWith(stateDir + path.sep)) {
+  if (pathsEqual(abs, stateDir) || isPathInside(stateDir, abs)) {
     return [];
   }
 

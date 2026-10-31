@@ -11,6 +11,7 @@ import {
   type Manifest,
 } from "./manifest.js";
 import { getHomeDir } from "./paths.js";
+import { pathKey } from "./path-util.js";
 
 export interface PlantResult {
   created: DecoyRecord[];
@@ -38,14 +39,14 @@ export function assertSafePlantTarget(
   const forbidden = new Set<string>();
   if (projectRoot !== undefined) {
     for (const f of FORBIDDEN_WRITE_PATHS(projectRoot, home)) {
-      forbidden.add(path.resolve(f));
+      forbidden.add(pathKey(f));
     }
   } else {
-    forbidden.add(path.resolve(home, ".aws", "credentials"));
-    forbidden.add(path.resolve(home, ".npmrc"));
+    forbidden.add(pathKey(path.join(home, ".aws", "credentials")));
+    forbidden.add(pathKey(path.join(home, ".npmrc")));
   }
 
-  if (forbidden.has(resolved)) {
+  if (forbidden.has(pathKey(resolved))) {
     throw new Error(`Refusing to write forbidden path: ${resolved}`);
   }
   if (isForbiddenEnvName(resolved)) {

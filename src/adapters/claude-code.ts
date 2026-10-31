@@ -5,13 +5,19 @@ import type { LogAdapter, ParsedLine } from "./types.js";
 /**
  * Claude Code transcript adapter.
  *
- * UNVERIFIED: The laptop spike (SPIKE-AND-SLICES.md §1) has not been run on
- * Prashant's machine. Path and JSONL shape below are taken from Claude Code's
- * publicly described layout (~/.claude/projects/<mangled-cwd>/<session>.jsonl)
- * and community format notes (tool results appear as type:"user" records with
- * message.content tool_result blocks; toolUseResult may be object or string).
- * Parser is intentionally tolerant and falls back to scanning the raw line
- * text so a shape drift still yields hits (kind "seen").
+ * Record shape confirmed on a real Windows machine on Oct 31 2026 (read-only
+ * check of ~/.claude/projects/... JSONL). Types seen: queue-operation, user,
+ * attachment, ai-title, assistant, last-prompt. Tool results are type:"user"
+ * records with keys parentUuid, isSidechain, promptId, type, message, uuid,
+ * timestamp, toolUseResult, sourceToolAssistantUUID, userType, entrypoint,
+ * cwd, sessionId, version, gitBranch (sometimes also toolDenialKind);
+ * message.content contains tool_result blocks; assistant records include
+ * tool_use with name:"Read". Live end-to-end tripwire detection on that
+ * machine is still pending. Path layout remains
+ * ~/.claude/projects/<mangled-cwd>/<session>.jsonl (mangled cwd may contain
+ * spaces, e.g. C--Users-Name With Space-...). Parser is intentionally
+ * tolerant and falls back to scanning the raw line text so a shape drift
+ * still yields hits (kind "seen").
  */
 export const CLAUDE_CODE_GLOB_REL = path.join(
   ".claude",
@@ -99,7 +105,7 @@ export function parseClaudeCodeLine(
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    // UNVERIFIED fallback: non-JSON line — still scan raw text as "seen".
+    // Non-JSON fallback: still scan raw text as "seen".
     return {
       tool: "claude-code",
       sessionId,

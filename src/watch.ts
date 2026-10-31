@@ -13,6 +13,7 @@ import { deriveWatchRoot, minimatchSimple } from "./glob-util.js";
 import { loadHits, seedSeenFromHits } from "./hits.js";
 import { loadOffsets, saveOffsets, type OffsetsState } from "./offsets.js";
 import { getManifestPath, getStateDir } from "./paths.js";
+import { isPathInside, pathKey, pathsEqual } from "./path-util.js";
 import type { TokenMatcher } from "./match.js";
 
 export interface WatchHandle {
@@ -150,7 +151,7 @@ export async function startWatch(
       .then(async () => {
         if (closed) return;
         const abs = path.resolve(filePath);
-        if (abs === manifestPath) {
+        if (pathsEqual(abs, manifestPath)) {
           const loaded = await loadMatcherFromManifest();
           matcherRef = loaded.matcher;
           return;
@@ -186,8 +187,17 @@ export async function startWatch(
   const activeRoots = new Set<string>();
   /** Paths watched at depth 0 while waiting for a missing adapter root. */
   const ancestorWatchers = new Map<string, FSWatcher>();
-  /** Pending adapter roots keyed by the depth-0 ancestor currently watched. */
-  const pendingByAncestor = new Map<string, RootSpec[]>();
+  /**
+   * Pending adapter roots keyed by the depth-0 ancestor currently watched.
+   * Keys are pathKey() so Windows drive-letter case from chokidar still hits.
+   */
+  const pendingByAncestor = new Map<
+    string,
+    { ancestorPath: string; specs: RootSpec[] }
+  >();
+
+  const hasActiveRoot = (root: string): boolean =>
+    [...activeRoots].some((r) => pathsEqual(r, root));
 
   let resolveReady!: () => void;
   const ready = new Promise<void>((r) => {
@@ -279,10 +289,7 @@ export async function startWatch(
       const files = await resolveAdapterFiles(adapter);
       for (const f of files) {
         const abs = path.resolve(f);
-        if (
-          abs === path.resolve(spec.root) ||
-          abs.startsWith(path.resolve(spec.root) + path.sep)
-        ) {
+        if (isPathInside(path.resolve(spec.root), abs)) {
           await enqueue(f);
         }
       }
@@ -291,10 +298,12 @@ export async function startWatch(
 
   function clearPending(spec: RootSpec): void {
     const root = path.resolve(spec.root);
-    for (const [anc, list] of pendingByAncestor) {
-      const next = list.filter((s) => path.resolve(s.root) !== root);
-      if (next.length === 0) pendingByAncestor.delete(anc);
-      else pendingByAncestor.set(anc, next);
+    for (const [ancKey, entry] of pendingByAncestor) {
+      const next = entry.specs.filter(
+        (s) => !pathsEqual(path.resolve(s.root), root),
+      );
+      if (next.length === 0) pendingByAncestor.delete(ancKey);
+      else pendingByAncestor.set(ancKey, { ...entry, specs: next });
     }
   }
 
@@ -303,7 +312,7 @@ export async function startWatch(
     countReady: boolean,
   ): Promise<void> {
     const root = path.resolve(spec.root);
-    if (closed || activeRoots.has(root)) return;
+    if (closed || hasActiveRoot(root)) return;
     try {
       const st = await stat(root);
       if (!st.isDirectory()) return;
@@ -331,15 +340,17 @@ export async function startWatch(
     countReady: boolean,
   ): void {
     const anc = path.resolve(ancestor);
-    const list = pendingByAncestor.get(anc) ?? [];
-    if (!list.some((s) => path.resolve(s.root) === path.resolve(spec.root))) {
+    const ancKey = pathKey(anc);
+    const existing = pendingByAncestor.get(ancKey);
+    const list = existing?.specs ?? [];
+    if (!list.some((s) => pathsEqual(path.resolve(s.root), path.resolve(spec.root)))) {
       list.push(spec);
-      pendingByAncestor.set(anc, list);
+      pendingByAncestor.set(ancKey, { ancestorPath: anc, specs: list });
     }
-    if (ancestorWatchers.has(anc)) return;
+    if (ancestorWatchers.has(ancKey)) return;
 
     const w = addWatcher(anc, { ...chokidarBase(), depth: 0 }, countReady);
-    ancestorWatchers.set(anc, w);
+    ancestorWatchers.set(ancKey, w);
   }
 
   /**
@@ -349,16 +360,17 @@ export async function startWatch(
   async function onPathEvent(eventPath: string): Promise<void> {
     if (closed) return;
     const abs = path.resolve(eventPath);
-    for (const [ancestor, specs] of [...pendingByAncestor.entries()]) {
-      if (abs !== ancestor && !abs.startsWith(ancestor + path.sep)) {
+    for (const [ancestorKey, entry] of [...pendingByAncestor.entries()]) {
+      const { ancestorPath, specs } = entry;
+      if (!isPathInside(ancestorPath, abs)) {
         continue;
       }
       for (const spec of [...specs]) {
         const desired = path.resolve(spec.root);
         if (
-          abs !== desired &&
-          !desired.startsWith(abs + path.sep) &&
-          !abs.startsWith(desired + path.sep)
+          !pathsEqual(abs, desired) &&
+          !isPathInside(abs, desired) &&
+          !isPathInside(desired, abs)
         ) {
           continue;
         }
@@ -374,13 +386,18 @@ export async function startWatch(
         }
 
         // Next segment toward desired appeared — watch it at depth 0.
-        if (abs !== ancestor && desired.startsWith(abs + path.sep)) {
+        if (!pathsEqual(abs, ancestorPath) && isPathInside(abs, desired)) {
           const remaining =
-            pendingByAncestor.get(ancestor)?.filter(
-              (s) => path.resolve(s.root) !== desired,
+            pendingByAncestor.get(ancestorKey)?.specs.filter(
+              (s) => !pathsEqual(path.resolve(s.root), desired),
             ) ?? [];
-          if (remaining.length === 0) pendingByAncestor.delete(ancestor);
-          else pendingByAncestor.set(ancestor, remaining);
+          if (remaining.length === 0) pendingByAncestor.delete(ancestorKey);
+          else {
+            pendingByAncestor.set(ancestorKey, {
+              ancestorPath,
+              specs: remaining,
+            });
+          }
           attachAncestorDepth0(abs, spec, false);
         }
       }
@@ -416,7 +433,7 @@ export async function startWatch(
   for (const item of planned) {
     if (item.kind === "real") {
       const root = path.resolve(item.spec.root);
-      if (activeRoots.has(root)) continue;
+      if (hasActiveRoot(root)) continue;
       const opts = chokidarBase();
       if (item.spec.depth !== undefined) {
         opts.depth = item.spec.depth;

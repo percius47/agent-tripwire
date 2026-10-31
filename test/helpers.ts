@@ -41,10 +41,22 @@ export async function readExact(filePath: string): Promise<Buffer> {
 }
 
 export function which(name: string): boolean {
+  if (process.platform === "win32") {
+    const probe = spawnSync("where", [name], {
+      encoding: "utf8",
+      shell: true,
+    });
+    return probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
+  }
   const probe = spawnSync("sh", ["-c", `command -v ${name}`], {
     encoding: "utf8",
   });
   return probe.status === 0 && probe.stdout.trim().length > 0;
+}
+
+/** `npm` resolves to npm.cmd on Windows; bare `npm` ENOENTs without a shell. */
+export function npmCmd(): string {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
 /** Init a git repo in `dir` with an initial commit (so exclude/check-ignore work). */

@@ -2,16 +2,17 @@ import { describe, expect, it, beforeAll } from "vitest";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { makeTempHome, makeTempProject } from "./helpers.js";
+import { makeTempHome, makeTempProject, npmCmd } from "./helpers.js";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cliJs = path.join(root, "dist", "cli.js");
 
 describe("CLI", () => {
   beforeAll(() => {
-    const build = spawnSync("npm", ["run", "build"], {
+    const build = spawnSync(npmCmd(), ["run", "build"], {
       cwd: root,
       encoding: "utf8",
+      shell: process.platform === "win32",
     });
     if (build.status !== 0) {
       throw new Error(`build failed: ${build.stderr || build.stdout}`);

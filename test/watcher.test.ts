@@ -28,7 +28,10 @@ import {
 import { runScan } from "../src/scan.js";
 import { readNewLines } from "../src/tail.js";
 import { formatTokenLabel } from "../src/token-label.js";
-import { PRIVATE_FILE_MODE } from "../src/fs-mode.js";
+import {
+  PRIVATE_FILE_MODE,
+  SUPPORTS_POSIX_FILE_MODES,
+} from "../src/fs-mode.js";
 import { startWatch } from "../src/watch.js";
 import {
   makeTempHome,
@@ -441,8 +444,10 @@ describe("watcher engine", () => {
       ]);
       await runScan();
       const hitsPath = getHitsPath();
-      const mode = (await stat(hitsPath)).mode & 0o777;
-      expect(mode).toBe(PRIVATE_FILE_MODE);
+      if (SUPPORTS_POSIX_FILE_MODES) {
+        const mode = (await stat(hitsPath)).mode & 0o777;
+        expect(mode).toBe(PRIVATE_FILE_MODE);
+      }
       const body = await readFile(hitsPath, "utf8");
       expect(body).toContain(tokenId); // full id only in the private hits log
       expect(body).toContain('"kind":"read"');

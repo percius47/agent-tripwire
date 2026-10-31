@@ -1,9 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { pathsEqual } from "./path-util.js";
 
 export const EXCLUDE_BEGIN = "# >>> agent-tripwire";
 export const EXCLUDE_END = "# <<< agent-tripwire";
+
+/** Normalize exclude file text to LF so markers / edits work with CRLF checkouts. */
+function normalizeExcludeText(content: string): string {
+  return content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
 
 function runGit(
   cwd: string,
@@ -44,7 +50,8 @@ export function isGitRepo(dir: string): boolean {
 export function gitTopLevel(dir: string): string | null {
   const r = runGit(dir, ["rev-parse", "--show-toplevel"]);
   if (r.status !== 0) return null;
-  return r.stdout.trim();
+  // Git-for-Windows often prints forward slashes / lowercase drive letters.
+  return path.resolve(r.stdout.trim());
 }
 
 export function excludeFilePath(repoRoot: string): string {
@@ -116,7 +123,7 @@ export async function writeExcludeBlock(
 
   let existing = "";
   try {
-    existing = await readFile(excludePath, "utf8");
+    existing = normalizeExcludeText(await readFile(excludePath, "utf8"));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== "ENOENT") throw err;
@@ -131,6 +138,7 @@ export async function writeExcludeBlock(
         ? `${without}\n${block}\n`
         : `${block}\n`;
 
+  // Always write LF; git exclude accepts forward-slash paths + LF on Windows.
   await writeFile(excludePath, next.length > 0 ? next : "", "utf8");
   return excludePath;
 }
@@ -140,7 +148,7 @@ export async function stripExcludeBlock(repoRoot: string): Promise<boolean> {
   const excludePath = excludeFilePath(repoRoot);
   let existing: string;
   try {
-    existing = await readFile(excludePath, "utf8");
+    existing = normalizeExcludeText(await readFile(excludePath, "utf8"));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return false;
@@ -177,6 +185,6 @@ export function resolveProjectRoot(cwd: string): {
     return { projectRoot: resolved, fromSubdir: false, gitRepo: true };
   }
   const topResolved = path.resolve(top);
-  const fromSubdir = topResolved !== resolved;
+  const fromSubdir = !pathsEqual(topResolved, resolved);
   return { projectRoot: topResolved, fromSubdir, gitRepo: true };
 }
