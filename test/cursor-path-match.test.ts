@@ -27,8 +27,10 @@ import {
 } from "../src/hits.js";
 import {
   commandMentionsDecoy,
+  decoyBelongsToTranscriptProject,
   findDecoyForToolPath,
   findDecoyMentionedInCommand,
+  normalizeProjectIdentity,
   pathRefersToDecoy,
   toCursorProjectSlug,
 } from "../src/path-match.js";
@@ -753,6 +755,80 @@ describe("cross-batch token upgrade (live watch)", () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe("Windows home-with-space project identity", () => {
+  // Real slugs from a Windows 11 machine whose home is
+  // C:\Users\Ashwini Chauhan (verified on-host).
+  const winHomeRoot = String.raw`C:\Users\Ashwini Chauhan\tripwire-sandbox`;
+  const cursorSandboxSlug = "c-Users-Ashwini-Chauhan-tripwire-sandbox";
+  const cursorLampSlug = "c-Users-Ashwini-Chauhan-Documents-GitHub-LAMP";
+  const claudeSandboxSlug = "C--Users-Ashwini-Chauhan-tripwire-sandbox";
+
+  const sandboxDecoy: DecoyRecord = {
+    path: String.raw`C:\Users\Ashwini Chauhan\tripwire-sandbox\.env.backup`,
+    sha256: "abc",
+    tokenId: "tw_win_space_token_xxxx",
+    createdAt: new Date().toISOString(),
+    scope: "project",
+    projectRoot: winHomeRoot,
+  };
+
+  it("normalizes Cursor and Claude slugs onto the same projectRoot key", () => {
+    const key = normalizeProjectIdentity(winHomeRoot);
+    expect(normalizeProjectIdentity(cursorSandboxSlug)).toBe(key);
+    expect(normalizeProjectIdentity(claudeSandboxSlug)).toBe(key);
+    expect(normalizeProjectIdentity(cursorLampSlug)).not.toBe(key);
+  });
+
+  it("Cursor shell-mention hits for the sandbox slug, not the LAMP slug", () => {
+    const cmd = "type .env.backup";
+    expect(
+      findDecoyMentionedInCommand(cmd, [sandboxDecoy], {
+        adapterId: "cursor",
+        projectHint: cursorSandboxSlug,
+      }),
+    ).toBe(sandboxDecoy);
+    expect(
+      findDecoyMentionedInCommand(cmd, [sandboxDecoy], {
+        adapterId: "cursor",
+        projectHint: cursorLampSlug,
+      }),
+    ).toBeNull();
+  });
+
+  it("Claude fallback slug C--Users-… matches the spaced projectRoot", () => {
+    expect(
+      decoyBelongsToTranscriptProject(sandboxDecoy, {
+        adapterId: "claude-code",
+        projectHint: claudeSandboxSlug,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not treat a projectRoot prefix as a match (app vs app2)", () => {
+    const app: DecoyRecord = {
+      ...sandboxDecoy,
+      path: String.raw`C:\Users\X\app\.env.backup`,
+      projectRoot: String.raw`C:\Users\X\app`,
+      tokenId: "tw_app_token_xxxx",
+    };
+    expect(
+      decoyBelongsToTranscriptProject(app, {
+        adapterId: "cursor",
+        projectHint: "c-Users-X-app2",
+      }),
+    ).toBe(false);
+    expect(
+      decoyBelongsToTranscriptProject(app, {
+        adapterId: "cursor",
+        projectHint: "c-Users-X-app",
+      }),
+    ).toBe(true);
+    expect(normalizeProjectIdentity(String.raw`C:\Users\X\app`)).not.toBe(
+      normalizeProjectIdentity(String.raw`C:\Users\X\app2`),
+    );
   });
 });
 

@@ -87,6 +87,7 @@ export {
   decoyProjectRelative,
   toCursorProjectSlug,
   toClaudeProjectSlug,
+  normalizeProjectIdentity,
   decoyBelongsToTranscriptProject,
   mapGitBashStylePath,
 } from "./path-match.js";

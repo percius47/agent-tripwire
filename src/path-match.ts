@@ -51,9 +51,9 @@ export function decoyProjectRelative(decoy: DecoyRecord): string {
 
 /**
  * Cursor project-folder slug for an absolute project root.
+ * Approximate form used when planting fixture dirs; identity compares go through
+ * {@link normalizeProjectIdentity} so spaces / `:\` vs `-` differences still match.
  * `C:\Users\Name\Documents\GitHub\LAMP` → `c-Users-Name-Documents-GitHub-LAMP`
- * (drive lowercased, `:` dropped, separators → `-`). Compared case-insensitively
- * on win32.
  */
 export function toCursorProjectSlug(projectRoot: string): string {
   let p = toPosixPath(projectRoot);
@@ -66,14 +66,30 @@ export function toCursorProjectSlug(projectRoot: string): string {
 
 /**
  * Claude Code mangled project dir for an absolute cwd/root.
- * `C:\Users\Name With Space\LAMP` → `C--Users-Name With Space-LAMP`
- * (`:` and separators → `-`; spaces kept).
+ * Approximate form; identity compares use {@link normalizeProjectIdentity}.
+ * `C:\Users\Name\LAMP` → `C--Users-Name-LAMP` (`:` and separators → `-`).
  */
 export function toClaudeProjectSlug(projectRoot: string): string {
   let p = toPosixPath(projectRoot);
   p = p.replace(/:/g, "-");
   p = p.replace(/\//g, "-");
   return p;
+}
+
+/**
+ * Canonical project-identity key for slug ↔ projectRoot compares.
+ * Lowercases, collapses every run of non-alphanumeric characters into a single
+ * `-`, then trims leading/trailing dashes. Exact equality only — a prefix must
+ * not match (`…-app` ≠ `…-app2`).
+ *
+ * Absorbs Cursor (`c-Users-…`, `:\` → one `-`) and Claude (`C--Users-…`,
+ * `:\` → two `-`) folder slugs, and Windows roots with spaces in the home path.
+ */
+export function normalizeProjectIdentity(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 export function cursorProjectSlugFromLogPath(filePath: string): string | undefined {
@@ -120,6 +136,8 @@ export interface TranscriptProjectContext {
 /**
  * True when the decoy's projectRoot corresponds to the transcript project.
  * Home-scoped decoys (no projectRoot) never match. Missing projectHint → false.
+ * Cursor / Claude slug hints are compared via {@link normalizeProjectIdentity}
+ * so Windows homes with spaces still match real Cursor/Claude folder names.
  */
 export function decoyBelongsToTranscriptProject(
   decoy: DecoyRecord,
@@ -130,10 +148,14 @@ export function decoyBelongsToTranscriptProject(
   if (!hint) return false;
 
   if (ctx.adapterId === "cursor") {
-    return fold(hint) === fold(toCursorProjectSlug(decoy.projectRoot));
+    return (
+      normalizeProjectIdentity(hint) ===
+      normalizeProjectIdentity(decoy.projectRoot)
+    );
   }
 
   if (ctx.adapterId === "claude-code") {
+    // Prefer absolute cwd from the Claude record when present.
     if (isAbsoluteToolPath(hint) || path.isAbsolute(hint) || hint.startsWith("/")) {
       const mapped = mapGitBashStylePath(hint);
       return (
@@ -141,7 +163,10 @@ export function decoyBelongsToTranscriptProject(
         normalizeToolPathForCompare(decoy.projectRoot)
       );
     }
-    return fold(hint) === fold(toClaudeProjectSlug(decoy.projectRoot));
+    return (
+      normalizeProjectIdentity(hint) ===
+      normalizeProjectIdentity(decoy.projectRoot)
+    );
   }
 
   return false;
