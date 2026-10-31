@@ -68,11 +68,22 @@ export {
   parseClaudeCodeLine,
   createCodexAdapter,
   parseCodexLine,
+  createCursorAdapter,
+  parseCursorLine,
   createConfigAdapter,
   type LogAdapter,
   type ParsedLine,
+  type PathSignal,
+  type PathSignalKind,
 } from "./adapters/index.js";
 export { buildTokenMatcher, valuesForDecoy } from "./match.js";
+export {
+  pathRefersToDecoy,
+  findDecoyForToolPath,
+  commandMentionsDecoy,
+  normalizeToolPathForCompare,
+  decoyProjectRelative,
+} from "./path-match.js";
 export { loadOffsets, saveOffsets, type OffsetsState } from "./offsets.js";
 export {
   appendHit,

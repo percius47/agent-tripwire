@@ -2,7 +2,15 @@ import { appendFile, chmod, mkdir, open, readFile } from "node:fs/promises";
 import { PRIVATE_FILE_MODE } from "./fs-mode.js";
 import { getHitsPath, getStateDir } from "./paths.js";
 
-export type HitKind = "read" | "seen";
+export type HitKind =
+  | "read"
+  | "seen"
+  | "read-attempt"
+  | "write-attempt"
+  | "shell-mention";
+
+/** How the decoy was detected (token in content vs path/shell mention). */
+export type HitSignal = "token" | "path";
 
 export interface HitRecord {
   /** ISO timestamp. */
@@ -10,7 +18,7 @@ export interface HitRecord {
   /** Primary decoy token id (full — never print to stdout). */
   tokenId: string;
   kind: HitKind;
-  /** Adapter id (claude-code, config:…). */
+  /** Adapter id (claude-code, cursor, config:…). */
   adapter: string;
   /** Tool label for alerts. */
   tool: string;
@@ -21,6 +29,10 @@ export interface HitRecord {
   decoyPath: string;
   /** Redacted snippet ≤ 200 chars (token replaced with label). */
   snippet: string;
+  /** Detection signals present on this hit (token and/or path). */
+  signals?: HitSignal[];
+  /** tool_use id when known (dedupe path + token for one tool call). */
+  toolUseId?: string;
 }
 
 /** Dedupe bag key: adapter + sourceFile + sessionId (not session alone). */

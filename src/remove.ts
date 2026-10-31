@@ -72,6 +72,18 @@ async function deleteQuietly(filePath: string): Promise<void> {
   }
 }
 
+/** Unlink and report whether the file actually existed. */
+async function deleteIfExists(filePath: string): Promise<boolean> {
+  try {
+    await unlink(filePath);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return false;
+    throw err;
+  }
+}
+
 /** Remove a directory only when it exists and is empty. */
 export async function removeDirIfEmpty(dir: string): Promise<boolean> {
   try {
@@ -106,13 +118,13 @@ async function maybeClearStateDir(manifest: Manifest): Promise<{
       removedStateDir: false,
     };
   }
-  await deleteQuietly(getManifestPath());
-  await deleteQuietly(getOffsetsPath());
+  const clearedManifest = await deleteIfExists(getManifestPath());
+  const clearedOffsets = await deleteIfExists(getOffsetsPath());
   // hits.jsonl intentionally kept
   const removedStateDir = await removeDirIfEmpty(getStateDir());
   return {
-    clearedManifest: true,
-    clearedOffsets: true,
+    clearedManifest,
+    clearedOffsets,
     removedStateDir,
   };
 }

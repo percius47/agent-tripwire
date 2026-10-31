@@ -121,7 +121,7 @@ export async function startWatch(
   options: WatchOptions = {},
 ): Promise<WatchHandle> {
   const adapters = options.adapters ?? (await loadAdapters());
-  let { matcher } = await loadMatcherFromManifest();
+  let { matcher, decoys } = await loadMatcherFromManifest();
   const offsets: OffsetsState = await loadOffsets();
   const seedFromHits = options.seedFromHits !== false;
   const seen = seedFromHits
@@ -145,6 +145,7 @@ export async function startWatch(
   let closed = false;
   let chain: Promise<void> = Promise.resolve();
   let matcherRef: TokenMatcher = matcher;
+  let decoysRef = decoys;
 
   const enqueue = (filePath: string) => {
     chain = chain
@@ -154,6 +155,7 @@ export async function startWatch(
         if (pathsEqual(abs, manifestPath)) {
           const loaded = await loadMatcherFromManifest();
           matcherRef = loaded.matcher;
+          decoysRef = loaded.decoys;
           return;
         }
         const adapter = adapterForFile(filePath, adapters, globCache);
@@ -162,6 +164,7 @@ export async function startWatch(
           filePath,
           adapter,
           matcher: matcherRef,
+          decoys: decoysRef,
           offsets,
           seen,
           persistOffsets: true,
@@ -480,6 +483,7 @@ export async function processWatchFileForTests(opts: {
   filePath: string;
   adapter: LogAdapter;
   matcher: TokenMatcher;
+  decoys?: import("./manifest.js").DecoyRecord[];
   offsets: OffsetsState;
   seen: Map<string, Set<string>>;
 }): Promise<EngineHit[]> {

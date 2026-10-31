@@ -1,6 +1,6 @@
 import path from "node:path";
 import { getHomeDir } from "../paths.js";
-import type { LogAdapter, ParsedLine } from "./types.js";
+import type { LogAdapter, ParsedLine, PathSignal } from "./types.js";
 
 /**
  * Claude Code transcript adapter.
@@ -18,6 +18,11 @@ import type { LogAdapter, ParsedLine } from "./types.js";
  * spaces, e.g. C--Users-Name With Space-...). Parser is intentionally
  * tolerant and falls back to scanning the raw line text so a shape drift
  * still yields hits (kind "seen").
+ *
+ * Path-based matching: assistant tool_use Read/Write/Edit/Grep/… with
+ * file_path / path / notebook_path, and Bash command mentions, are emitted
+ * as pathSignals (read-attempt / write-attempt / shell-mention) in addition
+ * to existing token-in-tool_result detection.
  */
 export const CLAUDE_CODE_GLOB_REL = path.join(
   ".claude",
@@ -87,6 +92,77 @@ function extractToolResultText(obj: Record<string, unknown>): string | null {
   return parts.join("\n");
 }
 
+function extractToolUseIdFromResult(
+  obj: Record<string, unknown>,
+): string | undefined {
+  const message = obj.message;
+  if (message !== null && typeof message === "object") {
+    const content = (message as { content?: unknown }).content;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block === null || typeof block !== "object") continue;
+        const b = block as Record<string, unknown>;
+        if (b.type === "tool_result" && typeof b.tool_use_id === "string") {
+          return b.tool_use_id;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+const PATH_KEYS = ["file_path", "path", "notebook_path"] as const;
+const WRITE_NAMES = new Set(["Write", "Edit", "NotebookEdit", "StrReplace"]);
+
+function extractPathSignals(obj: Record<string, unknown>): PathSignal[] {
+  const signals: PathSignal[] = [];
+  const message = obj.message;
+  if (message === null || typeof message !== "object") return signals;
+  const content = (message as { content?: unknown }).content;
+  if (!Array.isArray(content)) return signals;
+
+  for (const block of content) {
+    if (block === null || typeof block !== "object") continue;
+    const b = block as Record<string, unknown>;
+    if (b.type !== "tool_use") continue;
+    const name = typeof b.name === "string" ? b.name : "";
+    const id = typeof b.id === "string" ? b.id : undefined;
+    const input =
+      b.input !== null && typeof b.input === "object"
+        ? (b.input as Record<string, unknown>)
+        : {};
+
+    if (name === "Bash" || name === "Shell") {
+      if (typeof input.command === "string") {
+        const sig: PathSignal = {
+          kind: "shell-mention",
+          command: input.command,
+          toolName: name,
+        };
+        if (id) sig.toolUseId = id;
+        signals.push(sig);
+      }
+      continue;
+    }
+
+    for (const key of PATH_KEYS) {
+      const v = input[key];
+      if (typeof v === "string" && v.length > 0) {
+        const sig: PathSignal = {
+          kind: WRITE_NAMES.has(name) ? "write-attempt" : "read-attempt",
+          toolPath: v,
+          toolName: name,
+        };
+        if (id) sig.toolUseId = id;
+        signals.push(sig);
+        break;
+      }
+    }
+  }
+
+  return signals;
+}
+
 function extractAnyText(obj: Record<string, unknown>): string {
   const parts: string[] = [];
   collectStrings(obj, parts);
@@ -139,26 +215,33 @@ export function parseClaudeCodeLine(
         ? obj.sessionID
         : sessionId;
 
+  const pathSignals = extractPathSignals(obj);
   const toolResultText = extractToolResultText(obj);
   if (toolResultText !== null) {
-    return {
+    const result: ParsedLine = {
       tool: "claude-code",
       sessionId: sessionFromRecord,
       timestamp,
       text: toolResultText,
       isToolResult: true,
     };
+    const toolUseId = extractToolUseIdFromResult(obj);
+    if (toolUseId) result.toolUseId = toolUseId;
+    if (pathSignals.length > 0) result.pathSignals = pathSignals;
+    return result;
   }
 
   // Assistant / user prose etc. — match against aggregated string fields.
   const text = extractAnyText(obj);
-  return {
+  const result: ParsedLine = {
     tool: "claude-code",
     sessionId: sessionFromRecord,
     timestamp,
     text: text.length > 0 ? text : trimmed,
     isToolResult: false,
   };
+  if (pathSignals.length > 0) result.pathSignals = pathSignals;
+  return result;
 }
 
 export function createClaudeCodeAdapter(
