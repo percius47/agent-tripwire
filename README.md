@@ -81,12 +81,12 @@ After planting, Tripwire runs `git check-ignore` on each decoy and rolls back if
 
 | Adapter | Default glob | Status |
 |---------|--------------|--------|
-| Claude Code | `~/.claude/projects/*/*.jsonl` | Record shape confirmed on a real Windows machine on Oct 31 2026 (live end-to-end on that machine still pending) |
-| Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` | **UNVERIFIED** on a real machine (Codex not installed on the confirmation host) |
+| Claude Code | `~/.claude/projects/*/*.jsonl` | Record shape confirmed on a real Windows machine on Oct 31 2026 (live end-to-end on that machine still pending). Content-based (token in `tool_result`) plus path-based tool_use matching |
+| Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` | **UNVERIFIED** on a real machine (Codex not installed on the confirmation host). Content-based |
+| Cursor IDE | `~/.cursor/projects/*/agent-transcripts/*/*.jsonl` | Transcript shape confirmed on a real Windows 11 machine (read-only field check). **Path-based only** for reads — Cursor logs `tool_use` paths but not file contents, so hits are `read-attempt` / `write-attempt` / `shell-mention` (plus a raw-line token scan if the agent echoed a decoy token in text) |
 | Config | globs from `config.json` | Supported |
-| Cursor IDE | — | **Not supported** |
 
-Parsers are tolerant: if a line does not match the expected tool-result shape, the raw text is still scanned and tagged `seen` instead of `read`.
+Parsers are tolerant: if a line does not match the expected tool-result shape, the raw text is still scanned and tagged `seen` instead of `read`. Cursor has no tool_result payloads, so a Cursor Read of a decoy is a `read-attempt` (attempt to read), not a proven content `read`.
 
 ## `config.json` format
 
@@ -136,7 +136,7 @@ No network calls: no telemetry, no update check. State stays on disk under `~/.a
 ## Limitations (UNVERIFIED)
 
 - **Claude Code** JSONL record shape was confirmed on a real Windows machine on Oct 31 2026 (read-only check). Live end-to-end tripwire detection on that machine is still pending. **Codex** remains **UNVERIFIED** (not installed on that host). Path or record-shape drift may reduce attribution quality (hits can still fire via raw-line fallback as `seen`).
-- **Cursor IDE** chat storage (SQLite) is **not supported**.
+- **Cursor IDE** agent transcripts (JSONL under `~/.cursor/projects/…/agent-transcripts/`) are supported via path-based matching. Cursor does not log file contents, so a hit means a read/write/shell *attempt* against a decoy path, not proof the token was loaded into context. Relative tool paths in Cursor logs are **UNVERIFIED**; if present they match by basename / project-relative suffix only. Older Cursor chat SQLite storage is not used.
 - The aws/npm “ignore `.bak`” integration tests skip when those binaries are absent.
 - Desktop notifications depend on `node-notifier` and the host OS; `test-alert --no-notify` exercises stdout only.
 - Foreground `watch` only — no systemd/launchd/Scheduled Task installer in v0.1.0.

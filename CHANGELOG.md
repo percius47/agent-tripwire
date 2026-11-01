@@ -15,10 +15,10 @@ First release of **agent-tripwire**: plant non-functional decoy credentials and 
 
 ### Adapters
 
-- Claude Code (`~/.claude/projects/*/*.jsonl`) — record shape confirmed on a real Windows machine on Oct 31 2026 (live e2e pending)
+- Claude Code (`~/.claude/projects/*/*.jsonl`) — record shape confirmed on a real Windows machine on Oct 31 2026 (live e2e pending); token-in-tool_result plus path-based tool_use matching
 - Codex CLI (`~/.codex/sessions/**/rollout-*.jsonl`) — **UNVERIFIED** on a real machine
+- Cursor IDE (`~/.cursor/projects/*/agent-transcripts/*/*.jsonl`) — path-based detection (Cursor does not log file contents)
 - Config globs via `~/.agent-tripwire/config.json`
-- Cursor IDE — not supported
 
 ### Safety
 

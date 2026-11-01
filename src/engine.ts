@@ -1,5 +1,6 @@
+import { stat } from "node:fs/promises";
 import path from "node:path";
-import type { LogAdapter } from "./adapters/types.js";
+import type { LogAdapter, PathSignal } from "./adapters/types.js";
 import { expandGlob } from "./glob-util.js";
 import {
   appendHit,
@@ -9,6 +10,8 @@ import {
   seedSeenFromHits,
   type HitKind,
   type HitRecord,
+  type HitSignal,
+  type SeenBag,
 } from "./hits.js";
 import { loadManifest, type DecoyRecord } from "./manifest.js";
 import { buildTokenMatcher, type TokenMatcher } from "./match.js";
@@ -18,6 +21,11 @@ import {
   type FileOffset,
   type OffsetsState,
 } from "./offsets.js";
+import {
+  findDecoyForToolPath,
+  findDecoyMentionedInCommand,
+  type TranscriptProjectContext,
+} from "./path-match.js";
 import { getStateDir } from "./paths.js";
 import { isPathInside, pathsEqual } from "./path-util.js";
 import { formatTokenLabel } from "./token-label.js";
@@ -37,9 +45,15 @@ export interface ProcessFileOptions {
   filePath: string;
   adapter: LogAdapter;
   matcher: TokenMatcher;
+  /** Active decoys — used for path/shell matching (default []). */
+  decoys?: DecoyRecord[];
   offsets: OffsetsState;
-  /** adapter+sourceFile+sessionId → set of tokenIds already alerted. */
-  seen: Map<string, Set<string>>;
+  /**
+   * adapter+sourceFile+sessionId → tokenId → kinds already alerted.
+   * Each distinct kind is reported once; a later token hit may still fire
+   * after a path-only kind and keeps the path signal on the alert.
+   */
+  seen: SeenBag;
   /** When true, persist offsets after this file. */
   persistOffsets?: boolean;
   /**
@@ -57,18 +71,104 @@ export interface ProcessFileOptions {
 
 function formatAlert(hit: HitRecord): string {
   const label = formatTokenLabel(hit.tokenId);
-  const kind = hit.kind === "read" ? "read" : "seen";
-  return `Tripwire: ${hit.tool} ${kind} decoy ${hit.decoyPath} (${label}) in ${hit.sourceFile}`;
+  return `Tripwire: ${hit.tool} ${hit.kind} decoy ${hit.decoyPath} (${label}) in ${hit.sourceFile}`;
+}
+
+interface ResolvedPathHit {
+  kind: HitKind;
+  decoy: DecoyRecord;
+  toolUseId?: string;
+  snippetSource: string;
+}
+
+function resolvePathSignal(
+  signal: PathSignal,
+  decoys: DecoyRecord[],
+  ctx: TranscriptProjectContext,
+): ResolvedPathHit | null {
+  if (signal.kind === "shell-mention") {
+    if (typeof signal.command !== "string") return null;
+    const decoy = findDecoyMentionedInCommand(signal.command, decoys, ctx);
+    if (!decoy) return null;
+    const out: ResolvedPathHit = {
+      kind: "shell-mention",
+      decoy,
+      snippetSource: signal.command,
+    };
+    if (signal.toolUseId) out.toolUseId = signal.toolUseId;
+    return out;
+  }
+  if (typeof signal.toolPath !== "string") return null;
+  const decoy = findDecoyForToolPath(signal.toolPath, decoys, ctx);
+  if (!decoy) return null;
+  const out: ResolvedPathHit = {
+    kind: signal.kind,
+    decoy,
+    snippetSource: signal.toolPath,
+  };
+  if (signal.toolUseId) out.toolUseId = signal.toolUseId;
+  return out;
+}
+
+interface PendingPath {
+  kind: HitKind;
+  decoy: DecoyRecord;
+  toolUseId: string;
+  snippetSource: string;
+  parsedTool: string;
+  session: string;
+  timestampHint: string;
+}
+
+function isPathOnlyKind(kind: HitKind): boolean {
+  return (
+    kind === "read-attempt" ||
+    kind === "write-attempt" ||
+    kind === "shell-mention"
+  );
+}
+
+/**
+ * Path-based hits must not fire for transcript activity that predates the
+ * decoy. Prefer the record timestamp; when missing/unparseable, use the
+ * transcript file mtime. Token matches are never filtered by this.
+ */
+export function pathHitPredatesDecoy(
+  decoy: DecoyRecord,
+  recordTimestamp: string | undefined,
+  fileMtimeMs: number,
+): boolean {
+  const createdMs = Date.parse(decoy.createdAt);
+  if (Number.isNaN(createdMs)) return false;
+
+  const trimmed = recordTimestamp?.trim() ?? "";
+  let eventMs = Number.NaN;
+  if (trimmed.length > 0) {
+    eventMs = Date.parse(trimmed);
+  }
+  if (Number.isNaN(eventMs)) {
+    eventMs = fileMtimeMs;
+  }
+  if (Number.isNaN(eventMs)) return false;
+  return eventMs < createdMs;
 }
 
 /**
  * Process new bytes for one log file. Updates offsets in-place.
  * Returns newly recorded hits (after adapter+sourceFile+session dedupe).
+ *
+ * Token matches and path signals are merged per decoy on the same line
+ * (prefer token kind; record both signals). Path signals that share a
+ * tool_use id with a later token match in the same processFile batch are
+ * merged into one token hit. Across batches (live watch), each distinct
+ * kind per decoy is reported once; a later token hit still records and
+ * keeps a prior path signal on the alert.
  */
 export async function processFile(
   opts: ProcessFileOptions,
 ): Promise<EngineHit[]> {
   const { filePath, adapter, matcher, offsets, seen } = opts;
+  const decoys = opts.decoys ?? [];
   const abs = path.resolve(filePath);
 
   // Never scan Tripwire's own state dir (avoids false hits on our files).
@@ -81,62 +181,214 @@ export async function processFile(
   const { lines, next } = await readNewLines(abs, prev);
   offsets[abs] = next;
 
+  let fileMtimeMs = Number.NaN;
+  try {
+    fileMtimeMs = (await stat(abs)).mtimeMs;
+  } catch {
+    // readNewLines already succeeded; leave NaN so timestamp-less records
+    // without a usable mtime are not stale-filtered.
+  }
+
   const toProcess = [...lines];
   if (opts.includeTrailingPartial && next.partial.length > 0) {
     toProcess.push(next.partial);
   }
 
   const hits: EngineHit[] = [];
+  /** toolUseId → pending path hit awaiting a token on the same id. */
+  const pendingByToolUse = new Map<string, PendingPath>();
+
+  const recordHit = async (args: {
+    tokenId: string;
+    kind: HitKind;
+    tool: string;
+    session: string;
+    decoyPath: string;
+    snippet: string;
+    signals: HitSignal[];
+    toolUseId?: string;
+  }): Promise<void> => {
+    const key = hitDedupeKey(adapter.id, abs, args.session);
+    let bag = seen.get(key);
+    if (!bag) {
+      bag = new Map();
+      seen.set(key, bag);
+    }
+    let prevKinds = bag.get(args.tokenId);
+    if (!prevKinds) {
+      prevKinds = new Set();
+      bag.set(args.tokenId, prevKinds);
+    }
+    const signals = [...args.signals];
+    // Token alert after a path-only row: keep both signals on the new alert.
+    if (
+      [...prevKinds].some(isPathOnlyKind) &&
+      !isPathOnlyKind(args.kind) &&
+      !signals.includes("path")
+    ) {
+      signals.push("path");
+    }
+
+    const base: HitRecord = {
+      at: new Date().toISOString(),
+      tokenId: args.tokenId,
+      kind: args.kind,
+      adapter: adapter.id,
+      tool: args.tool,
+      sessionId: args.session,
+      sourceFile: abs,
+      decoyPath: args.decoyPath,
+      snippet: args.snippet,
+      signals,
+    };
+    if (args.toolUseId) base.toolUseId = args.toolUseId;
+
+    // Each distinct kind per decoy/file/session alerts once.
+    if (prevKinds.has(args.kind)) {
+      if (opts.includeKnown) {
+        hits.push({ ...base, alertLine: formatAlert(base), isNew: false });
+      }
+      return;
+    }
+
+    prevKinds.add(args.kind);
+    await appendHit(base);
+    hits.push({ ...base, alertLine: formatAlert(base), isNew: true });
+  };
 
   for (const line of toProcess) {
     const parsed = adapter.parse(line, abs);
     if (!parsed) continue;
-    const matches = matcher.findAll(parsed.text);
-    for (const m of matches) {
-      const session = parsed.sessionId || "unknown";
-      const key = hitDedupeKey(adapter.id, abs, session);
-      let bag = seen.get(key);
-      if (!bag) {
-        bag = new Set();
-        seen.set(key, bag);
-      }
-      if (bag.has(m.tokenId)) {
-        if (opts.includeKnown) {
-          const kind: HitKind = parsed.isToolResult ? "read" : "seen";
-          const label = formatTokenLabel(m.tokenId);
-          const hit: HitRecord = {
-            at: new Date().toISOString(),
-            tokenId: m.tokenId,
-            kind,
-            adapter: adapter.id,
-            tool: parsed.tool,
-            sessionId: session,
-            sourceFile: abs,
-            decoyPath: m.decoyPath,
-            snippet: buildHitSnippet(parsed.text, m.value, label),
-          };
-          hits.push({ ...hit, alertLine: formatAlert(hit), isNew: false });
-        }
+    const session = parsed.sessionId || "unknown";
+    const tokenMatches = matcher.findAll(parsed.text);
+    const projectCtx: TranscriptProjectContext = {
+      adapterId: adapter.id,
+    };
+    if (parsed.projectHint) projectCtx.projectHint = parsed.projectHint;
+
+    const pathResolved: ResolvedPathHit[] = [];
+    for (const sig of parsed.pathSignals ?? []) {
+      const r = resolvePathSignal(sig, decoys, projectCtx);
+      if (!r) continue;
+      if (pathHitPredatesDecoy(r.decoy, parsed.timestamp, fileMtimeMs)) {
         continue;
       }
-      bag.add(m.tokenId);
+      pathResolved.push(r);
+    }
+
+    // tokenId → path hit on this line (for same-line merge)
+    const pathByToken = new Map<string, ResolvedPathHit>();
+    for (const r of pathResolved) {
+      if (!pathByToken.has(r.decoy.tokenId)) {
+        pathByToken.set(r.decoy.tokenId, r);
+      }
+    }
+
+    const tokensHandled = new Set<string>();
+
+    for (const m of tokenMatches) {
+      tokensHandled.add(m.tokenId);
+      const pathHit = pathByToken.get(m.tokenId);
+      // Prefer token: consume pending path with same toolUseId or same decoy.
+      let pending: PendingPath | undefined;
+      if (parsed.toolUseId) {
+        pending = pendingByToolUse.get(parsed.toolUseId);
+        if (pending) pendingByToolUse.delete(parsed.toolUseId);
+      }
+      for (const [id, p] of [...pendingByToolUse]) {
+        if (p.decoy.tokenId === m.tokenId) {
+          pendingByToolUse.delete(id);
+          pending = pending ?? p;
+        }
+      }
+
+      // Also treat a prior path-only kind in the seen bag as a path signal
+      // (cross-batch after watch delivered tool_use separately).
+      const key = hitDedupeKey(adapter.id, abs, session);
+      const priorKinds = seen.get(key)?.get(m.tokenId);
+
+      const signals: HitSignal[] = ["token"];
+      if (
+        pathHit ||
+        pending ||
+        (priorKinds && [...priorKinds].some(isPathOnlyKind))
+      ) {
+        signals.push("path");
+      }
 
       const kind: HitKind = parsed.isToolResult ? "read" : "seen";
       const label = formatTokenLabel(m.tokenId);
-      const hit: HitRecord = {
-        at: new Date().toISOString(),
+      const hitArgs: {
+        tokenId: string;
+        kind: HitKind;
+        tool: string;
+        session: string;
+        decoyPath: string;
+        snippet: string;
+        signals: HitSignal[];
+        toolUseId?: string;
+      } = {
         tokenId: m.tokenId,
         kind,
-        adapter: adapter.id,
         tool: parsed.tool,
-        sessionId: session,
-        sourceFile: abs,
+        session,
         decoyPath: m.decoyPath,
         snippet: buildHitSnippet(parsed.text, m.value, label),
+        signals,
       };
-      await appendHit(hit);
-      hits.push({ ...hit, alertLine: formatAlert(hit), isNew: true });
+      const useId =
+        parsed.toolUseId ?? pathHit?.toolUseId ?? pending?.toolUseId;
+      if (useId) hitArgs.toolUseId = useId;
+      await recordHit(hitArgs);
     }
+
+    for (const r of pathResolved) {
+      if (tokensHandled.has(r.decoy.tokenId)) continue;
+      // Defer path hits that carry a toolUseId so a later tool_result token
+      // in this batch can merge (prefer token).
+      if (r.toolUseId) {
+        if (!pendingByToolUse.has(r.toolUseId)) {
+          pendingByToolUse.set(r.toolUseId, {
+            kind: r.kind,
+            decoy: r.decoy,
+            toolUseId: r.toolUseId,
+            snippetSource: r.snippetSource,
+            parsedTool: parsed.tool,
+            session,
+            timestampHint: parsed.timestamp,
+          });
+        }
+        continue;
+      }
+      const label = formatTokenLabel(r.decoy.tokenId);
+      await recordHit({
+        tokenId: r.decoy.tokenId,
+        kind: r.kind,
+        tool: parsed.tool,
+        session,
+        decoyPath: r.decoy.path,
+        snippet: r.snippetSource.slice(0, 200).split(r.decoy.tokenId).join(label),
+        signals: ["path"],
+      });
+    }
+  }
+
+  // Flush path attempts that never got a matching token in this batch.
+  for (const pending of pendingByToolUse.values()) {
+    const label = formatTokenLabel(pending.decoy.tokenId);
+    await recordHit({
+      tokenId: pending.decoy.tokenId,
+      kind: pending.kind,
+      tool: pending.parsedTool,
+      session: pending.session,
+      decoyPath: pending.decoy.path,
+      snippet: pending.snippetSource
+        .slice(0, 200)
+        .split(pending.decoy.tokenId)
+        .join(label),
+      signals: ["path"],
+      toolUseId: pending.toolUseId,
+    });
   }
 
   if (opts.persistOffsets !== false) {
@@ -194,7 +446,7 @@ export async function runScanPass(
   const seedFromHits = options.seedFromHits !== false;
   const seen = seedFromHits
     ? seedSeenFromHits(await loadHits())
-    : new Map<string, Set<string>>();
+    : createSeenMap();
   const allHits: EngineHit[] = [];
   const includeKnown = options.includeKnown === true;
 
@@ -208,6 +460,7 @@ export async function runScanPass(
         filePath,
         adapter,
         matcher,
+        decoys,
         offsets,
         seen,
         persistOffsets: !fromStart,
@@ -221,7 +474,7 @@ export async function runScanPass(
   return { hits: allHits, hitCount: allHits.length };
 }
 
-export function createSeenMap(): Map<string, Set<string>> {
+export function createSeenMap(): SeenBag {
   return new Map();
 }
 

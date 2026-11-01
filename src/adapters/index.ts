@@ -3,9 +3,10 @@ import { getHomeDir } from "../paths.js";
 import { createClaudeCodeAdapter } from "./claude-code.js";
 import { createCodexAdapter } from "./codex.js";
 import { createConfigAdapter } from "./config-adapter.js";
+import { createCursorAdapter } from "./cursor.js";
 import type { LogAdapter } from "./types.js";
 
-export type { LogAdapter, ParsedLine } from "./types.js";
+export type { LogAdapter, ParsedLine, PathSignal, PathSignalKind } from "./types.js";
 export {
   createClaudeCodeAdapter,
   parseClaudeCodeLine,
@@ -17,6 +18,11 @@ export {
   codexGlob,
   codexSessionsRoot,
 } from "./codex.js";
+export {
+  createCursorAdapter,
+  parseCursorLine,
+  cursorGlob,
+} from "./cursor.js";
 export { createConfigAdapter } from "./config-adapter.js";
 
 /** Built-in + config.json adapters for the current HOME. */
@@ -26,6 +32,7 @@ export async function loadAdapters(
   const adapters: LogAdapter[] = [
     createClaudeCodeAdapter(home),
     createCodexAdapter(home),
+    createCursorAdapter(home),
   ];
   const config = await loadConfig();
   config.adapters.forEach((entry, i) => {

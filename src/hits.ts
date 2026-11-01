@@ -2,7 +2,15 @@ import { appendFile, chmod, mkdir, open, readFile } from "node:fs/promises";
 import { PRIVATE_FILE_MODE } from "./fs-mode.js";
 import { getHitsPath, getStateDir } from "./paths.js";
 
-export type HitKind = "read" | "seen";
+export type HitKind =
+  | "read"
+  | "seen"
+  | "read-attempt"
+  | "write-attempt"
+  | "shell-mention";
+
+/** How the decoy was detected (token in content vs path/shell mention). */
+export type HitSignal = "token" | "path";
 
 export interface HitRecord {
   /** ISO timestamp. */
@@ -10,7 +18,7 @@ export interface HitRecord {
   /** Primary decoy token id (full — never print to stdout). */
   tokenId: string;
   kind: HitKind;
-  /** Adapter id (claude-code, config:…). */
+  /** Adapter id (claude-code, cursor, config:…). */
   adapter: string;
   /** Tool label for alerts. */
   tool: string;
@@ -21,6 +29,10 @@ export interface HitRecord {
   decoyPath: string;
   /** Redacted snippet ≤ 200 chars (token replaced with label). */
   snippet: string;
+  /** Detection signals present on this hit (token and/or path). */
+  signals?: HitSignal[];
+  /** tool_use id when known (dedupe path + token for one tool call). */
+  toolUseId?: string;
 }
 
 /** Dedupe bag key: adapter + sourceFile + sessionId (not session alone). */
@@ -31,6 +43,28 @@ export function hitDedupeKey(
 ): string {
   return `${adapter}\0${sourceFile}\0${sessionId}`;
 }
+
+/**
+ * Relative strength (token proof > path attempts > shell-mention). Kept for
+ * callers/tests; live dedupe is per distinct kind, not strongest-only.
+ */
+export function hitStrength(kind: HitKind): number {
+  switch (kind) {
+    case "read":
+    case "seen":
+      return 3;
+    case "read-attempt":
+    case "write-attempt":
+      return 2;
+    case "shell-mention":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/** adapter+file+session → tokenId → kinds already recorded for that decoy. */
+export type SeenBag = Map<string, Map<string, Set<HitKind>>>;
 
 /** Load all hit records from hits.jsonl (missing file → []). */
 export async function loadHits(): Promise<HitRecord[]> {
@@ -65,19 +99,26 @@ export async function loadHits(): Promise<HitRecord[]> {
   }
 }
 
-/** Seed in-memory dedupe from persisted hits (tokenId per adapter/file/session). */
-export function seedSeenFromHits(
-  hits: HitRecord[],
-): Map<string, Set<string>> {
-  const seen = new Map<string, Set<string>>();
+/**
+ * Seed in-memory dedupe from persisted hits (each kind per tokenId per
+ * adapter/file/session). A prior path-only row must not block a later token
+ * `read`/`seen` or a distinct path kind such as `shell-mention`.
+ */
+export function seedSeenFromHits(hits: HitRecord[]): SeenBag {
+  const seen: SeenBag = new Map();
   for (const h of hits) {
     const key = hitDedupeKey(h.adapter, h.sourceFile, h.sessionId);
     let bag = seen.get(key);
     if (!bag) {
-      bag = new Set();
+      bag = new Map();
       seen.set(key, bag);
     }
-    bag.add(h.tokenId);
+    let kinds = bag.get(h.tokenId);
+    if (!kinds) {
+      kinds = new Set();
+      bag.set(h.tokenId, kinds);
+    }
+    kinds.add(h.kind);
   }
   return seen;
 }
