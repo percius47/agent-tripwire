@@ -40,7 +40,7 @@ export function projectDecoyPlans(projectRoot: string): DecoyPlan[] {
         const secret = generateSecretLike();
         const content = [
           "# Old local overrides",
-          `DATABASE_URL=postgres://tripwire:${tokenId}@localhost:5432/app`,
+          `DATABASE_URL=postgres://app_ro:${tokenId}@localhost:5432/app`,
           `API_TOKEN=${secret}`,
           "",
         ].join("\n");

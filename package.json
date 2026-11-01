@@ -20,8 +20,8 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
-    "test": "vitest run --pool=forks --maxWorkers=2",
-    "test:watch": "vitest --pool=forks --maxWorkers=2",
+    "test": "PATH=\"$HOME/.local/bin:$PATH\" vitest run --pool=forks --maxWorkers=2",
+    "test:watch": "PATH=\"$HOME/.local/bin:$PATH\" vitest --pool=forks --maxWorkers=2",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "prepack": "npm run build"
   },
