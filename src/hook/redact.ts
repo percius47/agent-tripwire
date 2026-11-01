@@ -27,10 +27,10 @@ export function scrubKnownValues(text: string, values: string[]): string {
 
 /** Known secret shapes. Each match is replaced with a redacted preview. */
 const SECRET_PATTERNS: RegExp[] = [
-  // key=value / key: value with a long value
-  /((?:api[_-]?key|secret|token|password|passwd|pwd|auth(?:orization)?|bearer|access[_-]?key|private[_-]?key|client[_-]?secret)[\w-]*\s*[:=]\s*["']?)([^\s"'&;|]{6,})/gi,
   // HTTP auth headers
   /((?:authorization:\s*)?(?:bearer|basic|token)\s+)([A-Za-z0-9._~+/=-]{12,})/gi,
+  // key=value / key: value with a long value
+  /((?:api[_-]?key|secret|token|password|passwd|pwd|auth(?:orization)?|bearer|access[_-]?key|private[_-]?key|client[_-]?secret)[\w-]*\s*[:=]\s*["']?)(?!(?:bearer|basic|token)\b|\[redacted)([^\s"'&;|]{6,})/gi,
   // user:password@host in URLs
   /(\/\/[^\s/:@]+:)([^\s/@]{3,})(@)/g,
   // Well-known prefixes
