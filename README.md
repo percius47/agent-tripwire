@@ -59,6 +59,8 @@ agent-tripwire pause --for 30m   # default 30m, max 24h
 agent-tripwire resume            # turn blocking back on now
 ```
 
+`pause` asks you to type back a random 4-letter code, and it refuses to run without an interactive terminal or inside an AI agent's shell (`CLAUDECODE` / `CURSOR_AGENT` set), so an agent can't snooze it for you.
+
 While paused, nothing in this project is blocked and no pop-ups fire, but every hit is still written to `.tripwire/incidents.log` marked `paused`. The pause ends on its own. If an agent runs `agent-tripwire pause` / `remove` or writes Tripwire's state or hook files from the shell, the hook flags it as **tamper** (Cursor asks you, Claude Code denies), and that rule is never snoozed. Writes through an agent's own edit tools aren't hooked yet.
 
 ## Honest limits

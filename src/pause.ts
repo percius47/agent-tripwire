@@ -1,5 +1,7 @@
 import { readFile, unlink, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
+import { randomInt } from "node:crypto";
+import { createInterface } from "node:readline/promises";
 import { tripwireDir } from "./project-state.js";
 
 export interface PauseState {
@@ -107,4 +109,62 @@ export function isTamperCommand(command: string): boolean {
     return true;
   }
   return false;
+}
+
+/** Env vars set when a command runs inside an AI agent's shell tool. */
+const AGENT_ENV_VARS = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CURSOR_AGENT"];
+
+export function agentShellDetected(env: NodeJS.ProcessEnv = process.env): string | null {
+  for (const k of AGENT_ENV_VARS) {
+    if (env[k] !== undefined && env[k] !== "") return k;
+  }
+  return null;
+}
+
+/** Random 4-letter code, no look-alike letters. */
+export function makeConfirmCode(): string {
+  const letters = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+  let out = "";
+  for (let i = 0; i < 4; i++) out += letters[randomInt(letters.length)];
+  return out;
+}
+
+/**
+ * Ask a human to type back a random code. Refuses without a real terminal
+ * (agents run commands without one) or inside a known agent shell.
+ */
+export async function confirmHumanPause(
+  io: {
+    stdin: NodeJS.ReadStream;
+    stdout: NodeJS.WriteStream;
+    env?: NodeJS.ProcessEnv;
+  } = { stdin: process.stdin, stdout: process.stdout },
+  code: string = makeConfirmCode(),
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const agent = agentShellDetected(io.env ?? process.env);
+  if (agent) {
+    return {
+      ok: false,
+      reason: `Refusing to pause: this looks like an AI agent's shell (${agent} is set). Run it yourself in your own terminal.`,
+    };
+  }
+  if (!io.stdin.isTTY || !io.stdout.isTTY) {
+    return {
+      ok: false,
+      reason:
+        "Refusing to pause: no interactive terminal. Run `agent-tripwire pause` yourself in a terminal window.",
+    };
+  }
+  const rl = createInterface({ input: io.stdin, output: io.stdout });
+  try {
+    const answer = await rl.question(
+      `To pause Tripwire, type this code: ${code}\n> `,
+    );
+    if (answer.trim().toUpperCase() !== code) {
+      return { ok: false, reason: "Code didn't match. Tripwire stays on." };
+    }
+    return { ok: true };
+  } finally {
+    rl.close();
+  }
 }

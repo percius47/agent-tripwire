@@ -3,8 +3,10 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runInit } from "../src/init.js";
 import { runHookPayload } from "../src/hook/run.js";
+import { PassThrough } from "node:stream";
 import {
   activePause,
+  confirmHumanPause,
   isTamperCommand,
   parseDuration,
   pausePath,
@@ -137,5 +139,38 @@ describe("pause / resume", () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe("pause confirmation", () => {
+  function fakeIo(tty: boolean, env: NodeJS.ProcessEnv = {}) {
+    const stdin = new PassThrough() as unknown as NodeJS.ReadStream;
+    const stdout = new PassThrough() as unknown as NodeJS.WriteStream;
+    (stdin as { isTTY?: boolean }).isTTY = tty;
+    (stdout as { isTTY?: boolean }).isTTY = tty;
+    return { stdin, stdout, env };
+  }
+
+  it("refuses without a terminal", async () => {
+    const r = await confirmHumanPause(fakeIo(false), "ABCD");
+    expect(r.ok).toBe(false);
+  });
+
+  it("refuses inside an agent shell", async () => {
+    const r = await confirmHumanPause(fakeIo(true, { CLAUDECODE: "1" }), "ABCD");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/agent/);
+  });
+
+  it("accepts the right code and rejects a wrong one", async () => {
+    const good = fakeIo(true);
+    const p1 = confirmHumanPause(good, "WXYZ");
+    (good.stdin as unknown as PassThrough).write("wxyz\n");
+    expect((await p1).ok).toBe(true);
+
+    const bad = fakeIo(true);
+    const p2 = confirmHumanPause(bad, "WXYZ");
+    (bad.stdin as unknown as PassThrough).write("nope\n");
+    expect((await p2).ok).toBe(false);
   });
 });
