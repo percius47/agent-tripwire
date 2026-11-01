@@ -9,6 +9,8 @@ import {
   trackedPaths,
   writeExcludeBlock,
 } from "./git-exclude.js";
+import { writeGitignoreBlock } from "./gitignore-project.js";
+import { installProjectHooks } from "./hooks-install.js";
 import {
   loadManifest,
   saveManifest,
@@ -17,6 +19,13 @@ import {
 } from "./manifest.js";
 import { plantPlans, type PlantResult } from "./plant.js";
 import { pathsEqual } from "./path-util.js";
+import {
+  defaultAllowlist,
+  defaultProjectConfig,
+  ensureTripwireDir,
+  saveAllowlist,
+  saveProjectConfig,
+} from "./project-state.js";
 import { formatTokenLabel } from "./token-label.js";
 
 export { resolveProjectRoot } from "./git-exclude.js";
@@ -35,6 +44,10 @@ export interface InitReport {
   gitRepo: boolean;
   /** Absolute path of .git/info/exclude when we wrote an exclude block. */
   excludePath?: string;
+  /** Path of .gitignore when we wrote a marked ignore block. */
+  gitignorePath?: string;
+  /** Cursor / Claude project hook files written. */
+  hooks?: { cursorPath: string; claudePath: string };
   /** Decoys rolled back because check-ignore failed. */
   rolledBack: { path: string; reason: string }[];
   /** Tracked decoy paths that caused refusal (not planted). */
@@ -244,6 +257,43 @@ export async function runInit(options: InitOptions = {}): Promise<InitReport> {
   // plantPlans already saved per file; final save covers rollback / notes-only paths.
   await saveManifest(manifest);
 
+  // Project guard surface: .tripwire/, .gitignore block, project-level hooks.
+  await ensureTripwireDir(projectRoot);
+  await saveProjectConfig(projectRoot, defaultProjectConfig());
+  await saveAllowlist(projectRoot, defaultAllowlist());
+
+  const decoyRels = decoysForProject(manifest, projectRoot).map((d) =>
+    toRepoRelative(projectRoot, d.path),
+  );
+  // Also include planned relative paths even if skipped (already present).
+  for (const plan of projectDecoyPlans(projectRoot)) {
+    const rel = toRepoRelative(projectRoot, plan.path);
+    if (!decoyRels.includes(rel)) decoyRels.push(rel);
+  }
+
+  const gi = await writeGitignoreBlock(projectRoot, decoyRels);
+  notes.push(
+    gi.created
+      ? `Created ${gi.path} with decoy + .tripwire/ ignore rules.`
+      : `Updated marked block in ${gi.path} (decoys + .tripwire/).`,
+  );
+
+  const hooks = await installProjectHooks(projectRoot, decoyRels);
+  if (gi.created) {
+    const { loadInstallMeta, saveInstallMeta } = await import(
+      "./project-state.js"
+    );
+    const meta = await loadInstallMeta(projectRoot);
+    if (meta && !meta.createdFiles.includes(".gitignore")) {
+      meta.createdFiles = [...meta.createdFiles, ".gitignore"].sort();
+      await saveInstallMeta(projectRoot, meta);
+    }
+  }
+  notes.push(...hooks.notes);
+  notes.push(
+    "Project hooks point at `agent-tripwire-hook` (must be on PATH). Global/user configs were not modified.",
+  );
+
   return {
     projectRoot,
     home: includeHome,
@@ -251,6 +301,8 @@ export async function runInit(options: InitOptions = {}): Promise<InitReport> {
     ...(homeResult !== undefined ? { homeResult } : {}),
     gitRepo: inGit,
     ...(excludePath !== undefined ? { excludePath } : {}),
+    gitignorePath: gi.path,
+    hooks: { cursorPath: hooks.cursorPath, claudePath: hooks.claudePath },
     rolledBack,
     refusedTracked,
     notes,
@@ -269,6 +321,14 @@ export function formatInitReport(report: InitReport): string {
   }
   for (const r of report.rolledBack) {
     lines.push(`  rolled back ${r.path} (${r.reason})`);
+  }
+
+  if (report.hooks) {
+    lines.push(`  hooks ${report.hooks.cursorPath}`);
+    lines.push(`  hooks ${report.hooks.claudePath}`);
+  }
+  if (report.gitignorePath) {
+    lines.push(`  gitignore ${report.gitignorePath}`);
   }
 
   if (report.home && report.homeResult) {

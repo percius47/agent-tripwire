@@ -1,7 +1,7 @@
 {
   "name": "agent-tripwire",
-  "version": "0.1.0",
-  "description": "Plant non-functional decoy credentials and alert when a coding agent reads them",
+  "version": "0.2.0",
+  "description": "Per-project guard: plant decoy secrets and block/alert when Cursor or Claude Code read them",
   "type": "module",
   "license": "MIT",
   "author": "Prashant Singh Chauhan",
@@ -15,6 +15,7 @@
     "claude-code",
     "codex",
     "cursor",
+    "hooks",
     "secrets"
   ],
   "repository": {
@@ -29,7 +30,8 @@
     "node": ">=20"
   },
   "bin": {
-    "agent-tripwire": "./dist/cli.js"
+    "agent-tripwire": "./dist/cli.js",
+    "agent-tripwire-hook": "./dist/hook-bin.js"
   },
   "exports": {
     ".": "./dist/index.js"
@@ -40,7 +42,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node -e \"try{require('fs').chmodSync('dist/cli.js',0o755)}catch(_e){}\"",
+    "build": "tsc -p tsconfig.json && node -e \"const fs=require('fs');for (const f of ['dist/cli.js','dist/hook-bin.js']){try{fs.chmodSync(f,0o755)}catch(_e){}}\"",
     "test": "vitest run --pool=forks --maxWorkers=2 --test-timeout=20000",
     "test:watch": "vitest --pool=forks --maxWorkers=2 --test-timeout=20000",
     "typecheck": "tsc --noEmit -p tsconfig.json",

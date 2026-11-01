@@ -90,10 +90,15 @@ describe("git safety", () => {
         expect(isIgnored(project, rel)).toBe(true);
       }
 
-      expect(git(project, ["status", "--porcelain"]).trim()).toBe("");
-      expect(await readFile(path.join(project, ".gitignore"), "utf8")).toBe(
-        gitignoreBefore,
-      );
+      // Decoys are ignored (exclude + gitignore block). Hook files and the
+      // .gitignore edit may still show as untracked/modified — that's expected.
+      const porcelain = git(project, ["status", "--porcelain"]);
+      expect(porcelain).not.toMatch(/\.env\.backup/);
+      expect(porcelain).not.toMatch(/secrets\.legacy\.json/);
+      const giAfter = await readFile(path.join(project, ".gitignore"), "utf8");
+      expect(giAfter.startsWith(gitignoreBefore.trimEnd())).toBe(true);
+      expect(giAfter).toContain("# >>> agent-tripwire");
+      expect(giAfter).toContain(".tripwire/");
     } finally {
       restore();
     }
@@ -213,7 +218,9 @@ describe("git safety", () => {
       expect(exclude).toContain(".env.local.old");
       expect(exclude).toContain("config/secrets.legacy.json");
 
-      expect(git(project, ["status", "--porcelain"]).trim()).toBe("");
+      const porcelain = git(project, ["status", "--porcelain"]);
+      expect(porcelain).not.toMatch(/\.env\.backup/);
+      expect(porcelain).not.toMatch(/secrets\.legacy\.json/);
     } finally {
       restore();
     }
@@ -221,7 +228,7 @@ describe("git safety", () => {
 });
 
 describe("remove", () => {
-  it("deletes hash-matched decoys only; strips exclude; keeps .env/.gitignore identical", { timeout: 20_000 }, async () => {
+  it("deletes hash-matched decoys only; strips exclude; restores .gitignore byte-exact", { timeout: 20_000 }, async () => {
     const home = await makeTempHome();
     const restore = useHome(home);
     try {
@@ -239,6 +246,7 @@ describe("remove", () => {
       expect(remove1.deleted.length).toBe(3);
       expect(remove1.keptModified).toHaveLength(0);
       expect(remove1.excludeStripped).toBe(true);
+      expect(remove1.gitignoreStripped).toBe(true);
       expect(
         remove1.removedDirs.some((d) =>
           pathsEqual(d, path.join(project, "config")),

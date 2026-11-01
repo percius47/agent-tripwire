@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0
+
+**Agent Tripwire V1 — per-project guard**
+
+- `init` writes project-level `.cursor/hooks.json` + `.claude/settings.json` (merge, mark, backup), `.gitignore` block, and `.tripwire/`
+- New bin `agent-tripwire-hook`: local stdin JSON policy for Cursor (`beforeReadFile`, `beforeShellExecution`, `beforeMCPExecution`) and Claude Code (`PreToolUse`)
+- Rules: decoy deny, real-secret alert/allow (optional block), exfil ask/deny; allowlist; redacted incidents log
+- `incidents` CLI; native OS notify via `node-notifier` (mocked in tests)
+- `remove` restores hooks byte-exact when possible and deletes Tripwire-created empties
+- Docs: README quickstart + `docs/roadmap/v2-desktop-guard.md`
+- CI: add `macos-latest` to the Node 20/22 matrix
+
 ## 0.1.0
 
 First release of **agent-tripwire**: plant non-functional decoy credentials and alert when a coding agent reads them.
