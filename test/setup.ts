@@ -4,10 +4,26 @@
  *
  * Node built-in ESM exports are non-configurable, so we replace modules via
  * vi.mock rather than vi.spyOn.
+ *
+ * Also mock node-notifier globally — Windows CI has no notification center
+ * for tests, and desktop popups must not leak into the suite.
  */
 import { afterEach, beforeEach, vi } from "vitest";
 
 const MSG = "Network calls are forbidden in agent-tripwire tests";
+
+vi.mock("node-notifier", () => ({
+  default: {
+    notify: vi.fn(
+      (
+        _opts: unknown,
+        cb?: (err: Error | null, response: string) => void,
+      ) => {
+        cb?.(null, "ok");
+      },
+    ),
+  },
+}));
 
 function forbid(..._args: unknown[]): never {
   throw new Error(MSG);

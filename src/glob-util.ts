@@ -6,9 +6,15 @@ import path from "node:path";
  * Used to filter chokidar events and to walk adapter globs without fs.glob
  * (Node 20-compatible).
  */
+/** Normalize separators so Windows `\` paths match `/`-style globs (and vice versa). */
+function toPosixPath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
 export function minimatchSimple(filePath: string, pattern: string): boolean {
-  const normFile = filePath.split(path.sep).join("/");
-  const normPat = pattern.split(path.sep).join("/");
+  // Also fold path.sep in case callers mixed separators; keep literal `/` wildcards.
+  const normFile = toPosixPath(filePath.split(path.sep).join("/"));
+  const normPat = toPosixPath(pattern.split(path.sep).join("/"));
   // Protect wildcards before escaping regex metacharacters (otherwise `**`
   // becomes an invalid quantifier and `*` binds to the previous char).
   const DD = "\u0000DD\u0000";
@@ -16,7 +22,9 @@ export function minimatchSimple(filePath: string, pattern: string): boolean {
   const protectedPat = normPat.replace(/\*\*/g, DD).replace(/\*/g, ST);
   const escaped = protectedPat.replace(/[.+^${}()|[\]\\]/g, (ch) => `\\${ch}`);
   const reBody = escaped.replaceAll(DD, ".*").replaceAll(ST, "[^/]*");
-  return new RegExp(`^${reBody}$`).test(normFile);
+  // Windows: NTFS is case-insensitive; Claude project dirs may differ in drive case.
+  const flags = process.platform === "win32" ? "i" : "";
+  return new RegExp(`^${reBody}$`, flags).test(normFile);
 }
 
 export interface DerivedWatchRoot {
@@ -36,7 +44,8 @@ export interface DerivedWatchRoot {
  * depth, unless `**` appears (unlimited).
  */
 export function deriveWatchRoot(globPattern: string): DerivedWatchRoot {
-  const normalized = path.normalize(globPattern);
+  // Accept `/` in patterns on Windows (git-style / config.json globs).
+  const normalized = path.normalize(globPattern.replace(/\//g, path.sep));
   const parts = normalized.split(path.sep);
   const rootParts: string[] = [];
   let hitWildcard = false;

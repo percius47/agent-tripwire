@@ -1,9 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { canonicalizePathSync, pathsEqual } from "./path-util.js";
 
 export const EXCLUDE_BEGIN = "# >>> agent-tripwire";
 export const EXCLUDE_END = "# <<< agent-tripwire";
+
+/** Normalize exclude file text to LF so markers / edits work with CRLF checkouts. */
+function normalizeExcludeText(content: string): string {
+  return content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
 
 function runGit(
   cwd: string,
@@ -44,7 +50,9 @@ export function isGitRepo(dir: string): boolean {
 export function gitTopLevel(dir: string): string | null {
   const r = runGit(dir, ["rev-parse", "--show-toplevel"]);
   if (r.status !== 0) return null;
-  return r.stdout.trim();
+  // Git-for-Windows often prints forward slashes / long paths; Node temp
+  // dirs may use 8.3 short names — canonicalize so they match.
+  return canonicalizePathSync(r.stdout.trim());
 }
 
 export function excludeFilePath(repoRoot: string): string {
@@ -116,7 +124,7 @@ export async function writeExcludeBlock(
 
   let existing = "";
   try {
-    existing = await readFile(excludePath, "utf8");
+    existing = normalizeExcludeText(await readFile(excludePath, "utf8"));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== "ENOENT") throw err;
@@ -131,6 +139,7 @@ export async function writeExcludeBlock(
         ? `${without}\n${block}\n`
         : `${block}\n`;
 
+  // Always write LF; git exclude accepts forward-slash paths + LF on Windows.
   await writeFile(excludePath, next.length > 0 ? next : "", "utf8");
   return excludePath;
 }
@@ -140,7 +149,7 @@ export async function stripExcludeBlock(repoRoot: string): Promise<boolean> {
   const excludePath = excludeFilePath(repoRoot);
   let existing: string;
   try {
-    existing = await readFile(excludePath, "utf8");
+    existing = normalizeExcludeText(await readFile(excludePath, "utf8"));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return false;
@@ -155,7 +164,10 @@ export async function stripExcludeBlock(repoRoot: string): Promise<boolean> {
 }
 
 export function toRepoRelative(repoRoot: string, absolutePath: string): string {
-  const rel = path.relative(repoRoot, absolutePath);
+  const rel = path.relative(
+    canonicalizePathSync(repoRoot),
+    canonicalizePathSync(absolutePath),
+  );
   // git exclude / check-ignore prefer forward slashes
   return rel.split(path.sep).join("/");
 }
@@ -168,7 +180,7 @@ export function resolveProjectRoot(cwd: string): {
   fromSubdir: boolean;
   gitRepo: boolean;
 } {
-  const resolved = path.resolve(cwd);
+  const resolved = canonicalizePathSync(cwd);
   if (!isGitRepo(resolved)) {
     return { projectRoot: resolved, fromSubdir: false, gitRepo: false };
   }
@@ -176,7 +188,6 @@ export function resolveProjectRoot(cwd: string): {
   if (!top) {
     return { projectRoot: resolved, fromSubdir: false, gitRepo: true };
   }
-  const topResolved = path.resolve(top);
-  const fromSubdir = topResolved !== resolved;
-  return { projectRoot: topResolved, fromSubdir, gitRepo: true };
+  const fromSubdir = !pathsEqual(top, resolved);
+  return { projectRoot: top, fromSubdir, gitRepo: true };
 }

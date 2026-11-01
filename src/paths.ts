@@ -1,17 +1,19 @@
 import path from "node:path";
 import os from "node:os";
+import { canonicalizePathSync } from "./path-util.js";
 
 /**
  * Resolve the effective home directory.
  * Production uses os.homedir(). Tests may set AGENT_TRIPWIRE_HOME only
  * (never rely on mutating HOME for Tripwire state).
+ * Always canonicalize so Windows 8.3 short names match git/realpath forms.
  */
 export function getHomeDir(): string {
   const override = process.env.AGENT_TRIPWIRE_HOME;
   if (override !== undefined && override.length > 0) {
-    return override;
+    return canonicalizePathSync(override);
   }
-  return os.homedir();
+  return canonicalizePathSync(os.homedir());
 }
 
 /** State directory: ~/.agent-tripwire/ (respects AGENT_TRIPWIRE_HOME). */

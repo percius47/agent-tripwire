@@ -22,7 +22,10 @@ function awsEnv(home: string): NodeJS.ProcessEnv {
       "site-packages",
     ),
     PYTHONUSERBASE: path.join(realHome, ".local"),
-    PATH: `${path.join(realHome, ".local", "bin")}:${process.env.PATH ?? ""}`,
+    PATH: [
+      path.join(realHome, ".local", "bin"),
+      process.env.PATH ?? "",
+    ].join(path.delimiter),
   };
 }
 
@@ -100,9 +103,11 @@ describe("aws and npm ignore .bak decoys", () => {
 
         const env = npmEnv(home, npmrc);
 
-        const beforeList = spawnSync("npm", ["config", "list"], {
+        const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+        const beforeList = spawnSync(npm, ["config", "list"], {
           encoding: "utf8",
           env,
+          shell: process.platform === "win32",
         });
         expect(beforeList.status).toBe(0);
 
@@ -113,9 +118,13 @@ describe("aws and npm ignore .bak decoys", () => {
             .join("\n");
 
         const beforeAuth = spawnSync(
-          "npm",
+          npm,
           ["config", "get", "//registry.npmjs.org/:_authToken"],
-          { encoding: "utf8", env },
+          {
+            encoding: "utf8",
+            env,
+            shell: process.platform === "win32",
+          },
         );
         // npm may refuse to print protected tokens; treat identical failure as unchanged.
         const beforeAuthSnapshot = {
@@ -134,9 +143,10 @@ describe("aws and npm ignore .bak decoys", () => {
         const bakBody = await readFile(decoy!.path, "utf8");
         expect(bakBody).toContain(decoyToken);
 
-        const afterList = spawnSync("npm", ["config", "list"], {
+        const afterList = spawnSync(npm, ["config", "list"], {
           encoding: "utf8",
           env,
+          shell: process.platform === "win32",
         });
         expect(afterList.status).toBe(0);
         expect(afterList.stdout).toBe(beforeList.stdout);
@@ -144,9 +154,13 @@ describe("aws and npm ignore .bak decoys", () => {
         expect(afterList.stdout).not.toContain(".npmrc.bak");
 
         const afterAuth = spawnSync(
-          "npm",
+          npm,
           ["config", "get", "//registry.npmjs.org/:_authToken"],
-          { encoding: "utf8", env },
+          {
+            encoding: "utf8",
+            env,
+            shell: process.platform === "win32",
+          },
         );
         expect(afterAuth.status).toBe(beforeAuthSnapshot.status);
         expect(afterAuth.stdout).toBe(beforeAuthSnapshot.stdout);

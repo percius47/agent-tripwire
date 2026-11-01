@@ -39,9 +39,9 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
-    "test": "PATH=\"$HOME/.local/bin:$PATH\" vitest run --pool=forks --maxWorkers=2 --test-timeout=20000",
-    "test:watch": "PATH=\"$HOME/.local/bin:$PATH\" vitest --pool=forks --maxWorkers=2 --test-timeout=20000",
+    "build": "tsc -p tsconfig.json && node -e \"try{require('fs').chmodSync('dist/cli.js',0o755)}catch(_e){}\"",
+    "test": "vitest run --pool=forks --maxWorkers=2 --test-timeout=20000",
+    "test:watch": "vitest --pool=forks --maxWorkers=2 --test-timeout=20000",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build"

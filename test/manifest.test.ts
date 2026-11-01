@@ -49,7 +49,13 @@ describe("loadManifest", () => {
     }
   });
 
-  it("saves with mode 0600", async () => {
+  it("saves with mode 0600", async (ctx) => {
+    if (process.platform === "win32") {
+      ctx.skip(
+        "POSIX mode 0600 is a no-op on Windows; ACLs are not asserted",
+      );
+      return;
+    }
     const home = await makeTempHome();
     const restore = useHome(home);
     try {

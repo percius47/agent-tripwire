@@ -1,10 +1,11 @@
-import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, realpath } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
 
 export async function makeTempHome(): Promise<string> {
-  return mkdtemp(path.join(os.tmpdir(), "tripwire-home-"));
+  // realpath expands Windows 8.3 short names so paths match git toplevel.
+  return realpath(await mkdtemp(path.join(os.tmpdir(), "tripwire-home-")));
 }
 
 /** Project dir without pre-creating config/ (so createdDirs can be recorded). */
@@ -41,10 +42,22 @@ export async function readExact(filePath: string): Promise<Buffer> {
 }
 
 export function which(name: string): boolean {
+  if (process.platform === "win32") {
+    const probe = spawnSync("where", [name], {
+      encoding: "utf8",
+      shell: true,
+    });
+    return probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
+  }
   const probe = spawnSync("sh", ["-c", `command -v ${name}`], {
     encoding: "utf8",
   });
   return probe.status === 0 && probe.stdout.trim().length > 0;
+}
+
+/** `npm` resolves to npm.cmd on Windows; bare `npm` ENOENTs without a shell. */
+export function npmCmd(): string {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
 /** Init a git repo in `dir` with an initial commit (so exclude/check-ignore work). */

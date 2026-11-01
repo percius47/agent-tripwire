@@ -55,8 +55,12 @@ export async function readNewLines(
     const parts = combined.split("\n");
     // Last element is the incomplete trailing line (empty when chunk ended in \n).
     const nextPartial = parts.pop() ?? "";
+    // Strip CR so CRLF (Windows JSONL) yields the same logical lines as LF.
+    const lines = parts.map((l) =>
+      l.endsWith("\r") ? l.slice(0, -1) : l,
+    );
     return {
-      lines: parts,
+      lines,
       next: { offset: offset + bytesRead, partial: nextPartial },
       truncated,
     };

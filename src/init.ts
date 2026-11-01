@@ -16,6 +16,7 @@ import {
   type Manifest,
 } from "./manifest.js";
 import { plantPlans, type PlantResult } from "./plant.js";
+import { pathsEqual } from "./path-util.js";
 import { formatTokenLabel } from "./token-label.js";
 
 export { resolveProjectRoot } from "./git-exclude.js";
@@ -67,12 +68,11 @@ function decoysForProject(
   manifest: Manifest,
   projectRoot: string,
 ): DecoyRecord[] {
-  const root = path.resolve(projectRoot);
   return manifest.decoys.filter(
     (d) =>
       d.scope === "project" &&
       d.projectRoot !== undefined &&
-      path.resolve(d.projectRoot) === root,
+      pathsEqual(d.projectRoot, projectRoot),
   );
 }
 
@@ -142,7 +142,7 @@ async function secureGitIgnore(
 }
 
 export async function runInit(options: InitOptions = {}): Promise<InitReport> {
-  const cwd = path.resolve(options.projectRoot ?? process.cwd());
+  const cwd = options.projectRoot ?? process.cwd();
   const resolved = resolveProjectRoot(cwd);
   const projectRoot = resolved.projectRoot;
   const includeHome = options.home === true;
@@ -168,17 +168,15 @@ export async function runInit(options: InitOptions = {}): Promise<InitReport> {
     const rels = projectPlans.map((p) => toRepoRelative(repoRoot, p.path));
     const tracked = trackedPaths(repoRoot, rels);
     if (tracked.length > 0) {
-      const trackedSet = new Set(
-        tracked.map((t) => path.resolve(repoRoot, t)),
-      );
+      const trackedAbs = tracked.map((t) => path.resolve(repoRoot, t));
+      const isTracked = (p: string) =>
+        trackedAbs.some((t) => pathsEqual(t, p));
       for (const plan of projectPlans) {
-        if (trackedSet.has(path.resolve(plan.path))) {
+        if (isTracked(plan.path)) {
           refusedTracked.push(plan.path);
         }
       }
-      plansToPlant = projectPlans.filter(
-        (p) => !trackedSet.has(path.resolve(p.path)),
-      );
+      plansToPlant = projectPlans.filter((p) => !isTracked(p.path));
       notes.push(
         `Refused ${refusedTracked.length} tracked decoy path(s); not planted.`,
       );

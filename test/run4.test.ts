@@ -30,6 +30,7 @@ import {
   initGitRepo,
   makeTempHome,
   makeTempProject,
+  npmCmd,
   readExact,
   useHome,
   writeFixture,
@@ -358,9 +359,10 @@ describe("exit codes", () => {
   });
 
   it("CLI scan/status/test-alert exit codes", async () => {
-    const build = spawnSync("npm", ["run", "build"], {
+    const build = spawnSync(npmCmd(), ["run", "build"], {
       cwd: root,
       encoding: "utf8",
+      shell: process.platform === "win32",
     });
     expect(build.status).toBe(0);
 
