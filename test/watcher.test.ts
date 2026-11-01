@@ -16,6 +16,7 @@ import {
   runScanPass,
 } from "../src/engine.js";
 import { runInit } from "../src/init.js";
+import { loadHits } from "../src/hits.js";
 import { loadManifest } from "../src/manifest.js";
 import { buildTokenMatcher } from "../src/match.js";
 import { loadOffsets, saveOffsets } from "../src/offsets.js";
@@ -28,6 +29,7 @@ import { runScan } from "../src/scan.js";
 import { readNewLines } from "../src/tail.js";
 import { formatTokenLabel } from "../src/token-label.js";
 import { PRIVATE_FILE_MODE } from "../src/fs-mode.js";
+import { startWatch } from "../src/watch.js";
 import {
   makeTempHome,
   makeTempProject,
@@ -478,6 +480,193 @@ describe("watcher engine", () => {
       restore();
     }
   });
+
+  it("scan matches a token on a trailing partial line without newline", async () => {
+    const home = await makeTempHome();
+    const restore = useHome(home);
+    try {
+      const project = await makeTempProject(home);
+      const { tokenId } = await plantAndToken(home, project);
+      const dir = path.join(home, ".claude", "projects", "-tmp-demo");
+      await mkdir(dir, { recursive: true });
+      const file = path.join(dir, "sess-partial-eof.jsonl");
+      // No trailing newline — scan must still see this line.
+      await writeFile(file, toolResultLine(tokenId, "sess-partial-eof"), "utf8");
+
+      const dirty = await runScan();
+      expect(dirty.exitCode).toBe(1);
+      expect(dirty.hits.length).toBeGreaterThanOrEqual(1);
+      expect(dirty.hits[0]?.kind).toBe("read");
+    } finally {
+      restore();
+    }
+  });
+
+  it("dedupes on adapter+sourceFile+sessionId so same basename in different dirs yields 2 hits", async () => {
+    const home = await makeTempHome();
+    const restore = useHome(home);
+    try {
+      const project = await makeTempProject(home);
+      const { tokenId } = await plantAndToken(home, project);
+      const adapter = createClaudeCodeAdapter(home);
+      const matcher = buildTokenMatcher((await loadManifest()).decoys);
+      const offsets = await loadOffsets();
+      const seen = createSeenMap();
+
+      const dirA = path.join(home, ".claude", "projects", "-proj-a");
+      const dirB = path.join(home, ".claude", "projects", "-proj-b");
+      await mkdir(dirA, { recursive: true });
+      await mkdir(dirB, { recursive: true });
+      const fileA = path.join(dirA, "same-name.jsonl");
+      const fileB = path.join(dirB, "same-name.jsonl");
+      await writeFile(
+        fileA,
+        `${toolResultLine(tokenId, "same-name")}\n`,
+        "utf8",
+      );
+      await writeFile(
+        fileB,
+        `${toolResultLine(tokenId, "same-name")}\n`,
+        "utf8",
+      );
+
+      const hitsA = await processFile({
+        filePath: fileA,
+        adapter,
+        matcher,
+        offsets,
+        seen,
+      });
+      const hitsB = await processFile({
+        filePath: fileB,
+        adapter,
+        matcher,
+        offsets,
+        seen,
+      });
+      expect(hitsA).toHaveLength(1);
+      expect(hitsB).toHaveLength(1);
+      expect(hitsA[0]?.sourceFile).not.toBe(hitsB[0]?.sourceFile);
+    } finally {
+      restore();
+    }
+  });
+
+  it("running scan twice does not append duplicate hits", async () => {
+    const home = await makeTempHome();
+    const restore = useHome(home);
+    try {
+      const project = await makeTempProject(home);
+      const { tokenId } = await plantAndToken(home, project);
+      await writeClaudeLog(home, "sess-twice", [
+        toolResultLine(tokenId, "sess-twice"),
+      ]);
+
+      const first = await runScan();
+      expect(first.exitCode).toBe(1);
+      expect(first.hits.length).toBeGreaterThanOrEqual(1);
+      const linesAfterFirst = (await loadHits()).length;
+
+      const second = await runScan();
+      expect(second.hits).toHaveLength(0);
+      expect(second.exitCode).toBe(0);
+      expect((await loadHits()).length).toBe(linesAfterFirst);
+    } finally {
+      restore();
+    }
+  });
+
+  it(
+    "startWatch fires onHit when a tool_result line is appended",
+    { timeout: 15_000 },
+    async () => {
+      const home = await makeTempHome();
+      const restore = useHome(home);
+      let handle: Awaited<ReturnType<typeof startWatch>> | undefined;
+      try {
+        const project = await makeTempProject(home);
+        const { tokenId } = await plantAndToken(home, project);
+        const dir = path.join(home, ".claude", "projects", "-tmp-demo");
+        await mkdir(dir, { recursive: true });
+        const file = path.join(dir, "sess-live.jsonl");
+        await writeFile(file, "", "utf8");
+
+        const hits: string[] = [];
+        handle = await startWatch({
+          adapters: [createClaudeCodeAdapter(home)],
+          initialScan: false,
+          onHit: (h) => {
+            hits.push(h.tokenId);
+          },
+        });
+        await handle.ready;
+
+        await appendFile(
+          file,
+          `${toolResultLine(tokenId, "sess-live")}\n`,
+          "utf8",
+        );
+
+        const deadline = Date.now() + 8_000;
+        while (hits.length === 0 && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        expect(hits).toEqual([tokenId]);
+      } finally {
+        await handle?.close();
+        restore();
+      }
+    },
+  );
+
+  it(
+    "rebuilds matcher when manifest.json changes during watch",
+    { timeout: 20_000 },
+    async () => {
+      const home = await makeTempHome();
+      const restore = useHome(home);
+      let handle: Awaited<ReturnType<typeof startWatch>> | undefined;
+      try {
+        const project = await makeTempProject(home);
+        // Pre-create Claude projects dir so chokidar has a root to watch.
+        const dir = path.join(home, ".claude", "projects", "-tmp-demo");
+        await mkdir(dir, { recursive: true });
+        const file = path.join(dir, "sess-late.jsonl");
+        await writeFile(file, "", "utf8");
+
+        const hits: string[] = [];
+        handle = await startWatch({
+          adapters: [createClaudeCodeAdapter(home)],
+          initialScan: false,
+          onHit: (h) => {
+            hits.push(h.tokenId);
+          },
+        });
+        await handle.ready;
+
+        // Plant decoys while watch is already running.
+        const { tokenId } = await plantAndToken(home, project);
+
+        // Give the manifest watcher a moment to reload the matcher.
+        await new Promise((r) => setTimeout(r, 400));
+
+        await appendFile(
+          file,
+          `${toolResultLine(tokenId, "sess-late")}\n`,
+          "utf8",
+        );
+
+        const deadline = Date.now() + 10_000;
+        while (hits.length === 0 && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        expect(hits).toEqual([tokenId]);
+      } finally {
+        await handle?.close();
+        restore();
+      }
+    },
+  );
 });
 
 describe("claude parser tolerance (UNVERIFIED shapes)", () => {

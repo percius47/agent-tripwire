@@ -66,13 +66,22 @@ export {
   loadAdapters,
   createClaudeCodeAdapter,
   parseClaudeCodeLine,
+  createCodexAdapter,
+  parseCodexLine,
   createConfigAdapter,
   type LogAdapter,
   type ParsedLine,
 } from "./adapters/index.js";
 export { buildTokenMatcher, valuesForDecoy } from "./match.js";
 export { loadOffsets, saveOffsets, type OffsetsState } from "./offsets.js";
-export { appendHit, buildHitSnippet, type HitRecord } from "./hits.js";
+export {
+  appendHit,
+  buildHitSnippet,
+  loadHits,
+  seedSeenFromHits,
+  hitDedupeKey,
+  type HitRecord,
+} from "./hits.js";
 export { readNewLines } from "./tail.js";
 export {
   processFile,
@@ -82,3 +91,8 @@ export {
 } from "./engine.js";
 export { runScan, formatScanReport } from "./scan.js";
 export { startWatch } from "./watch.js";
+export { expandGlob, minimatchSimple, deriveWatchRoot } from "./glob-util.js";
+export { notifyHit, sampleAlertLine } from "./notify.js";
+export { runStatus, formatStatusReport } from "./status.js";
+export { runTestAlert } from "./test-alert.js";
+export { EXIT } from "./exit-codes.js";

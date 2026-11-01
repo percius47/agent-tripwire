@@ -1,7 +1,15 @@
-import { glob } from "node:fs/promises";
 import path from "node:path";
 import type { LogAdapter } from "./adapters/types.js";
-import { buildHitSnippet, appendHit, type HitKind, type HitRecord } from "./hits.js";
+import { expandGlob } from "./glob-util.js";
+import {
+  appendHit,
+  buildHitSnippet,
+  hitDedupeKey,
+  loadHits,
+  seedSeenFromHits,
+  type HitKind,
+  type HitRecord,
+} from "./hits.js";
 import { loadManifest, type DecoyRecord } from "./manifest.js";
 import { buildTokenMatcher, type TokenMatcher } from "./match.js";
 import {
@@ -24,14 +32,15 @@ export interface ProcessFileOptions {
   adapter: LogAdapter;
   matcher: TokenMatcher;
   offsets: OffsetsState;
-  /** sessionKey → set of tokenIds already alerted. */
+  /** adapter+sourceFile+sessionId → set of tokenIds already alerted. */
   seen: Map<string, Set<string>>;
   /** When true, persist offsets after this file. */
   persistOffsets?: boolean;
-}
-
-function dedupeKey(sessionId: string): string {
-  return sessionId;
+  /**
+   * When true, also match a non-empty trailing partial line (file does not
+   * end in a newline). Used by scan; watch waits for a complete line.
+   */
+  includeTrailingPartial?: boolean;
 }
 
 function formatAlert(hit: HitRecord): string {
@@ -42,7 +51,7 @@ function formatAlert(hit: HitRecord): string {
 
 /**
  * Process new bytes for one log file. Updates offsets in-place.
- * Returns newly recorded hits (after per-token-per-session dedupe).
+ * Returns newly recorded hits (after adapter+sourceFile+session dedupe).
  */
 export async function processFile(
   opts: ProcessFileOptions,
@@ -60,18 +69,24 @@ export async function processFile(
   const { lines, next } = await readNewLines(abs, prev);
   offsets[abs] = next;
 
+  const toProcess = [...lines];
+  if (opts.includeTrailingPartial && next.partial.length > 0) {
+    toProcess.push(next.partial);
+  }
+
   const hits: EngineHit[] = [];
 
-  for (const line of lines) {
+  for (const line of toProcess) {
     const parsed = adapter.parse(line, abs);
     if (!parsed) continue;
     const matches = matcher.findAll(parsed.text);
     for (const m of matches) {
       const session = parsed.sessionId || "unknown";
-      let bag = seen.get(dedupeKey(session));
+      const key = hitDedupeKey(adapter.id, abs, session);
+      let bag = seen.get(key);
       if (!bag) {
         bag = new Set();
-        seen.set(dedupeKey(session), bag);
+        seen.set(key, bag);
       }
       if (bag.has(m.tokenId)) continue;
       bag.add(m.tokenId);
@@ -100,15 +115,14 @@ export async function processFile(
   return hits;
 }
 
-/** Expand adapter globs to concrete existing (and pattern-matched) paths. */
+/** Expand adapter globs to concrete existing paths (manual walk, Node 20). */
 export async function resolveAdapterFiles(
   adapter: LogAdapter,
 ): Promise<string[]> {
   const globs = await adapter.globs();
   const files = new Set<string>();
   for (const g of globs) {
-    // node:fs/promises glob (Node >= 22) yields matching paths.
-    for await (const p of glob(g)) {
+    for (const p of await expandGlob(g)) {
       files.add(path.resolve(p));
     }
   }
@@ -120,6 +134,11 @@ export interface ScanOptions {
   decoys?: DecoyRecord[];
   /** Reset offsets to 0 for a full one-shot pass (default true for scan). */
   fromStart?: boolean;
+  /**
+   * Seed dedupe from existing hits.jsonl so a second scan does not append
+   * duplicates or re-notify (default true).
+   */
+  seedFromHits?: boolean;
 }
 
 /**
@@ -137,9 +156,10 @@ export async function runScanPass(
   // Scan uses ephemeral offsets so it does not disturb the watcher's cursor,
   // unless the caller is the watch bootstrap (fromStart false).
   const offsets: OffsetsState = fromStart ? {} : await loadOffsets();
-  const seen = new Map<string, Set<string>>();
-  // Seed dedupe from nothing for scan; each scan is independent for exit code,
-  // but still dedupe within the pass.
+  const seedFromHits = options.seedFromHits !== false;
+  const seen = seedFromHits
+    ? seedSeenFromHits(await loadHits())
+    : new Map<string, Set<string>>();
   const allHits: EngineHit[] = [];
 
   for (const adapter of options.adapters) {
@@ -155,6 +175,7 @@ export async function runScanPass(
         offsets,
         seen,
         persistOffsets: !fromStart,
+        includeTrailingPartial: fromStart,
       });
       allHits.push(...hits);
     }

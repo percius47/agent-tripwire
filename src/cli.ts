@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import { EXIT } from "./exit-codes.js";
 import { formatInitReport, runInit } from "./init.js";
+import { notifyHit } from "./notify.js";
 import { formatRemoveReport, runRemove } from "./remove.js";
 import { formatScanReport, runScan } from "./scan.js";
+import { formatStatusReport, runStatus } from "./status.js";
+import { runTestAlert } from "./test-alert.js";
 import { startWatch } from "./watch.js";
 
 const program = new Command();
@@ -22,7 +26,9 @@ program
     const report = await runInit({ home: opts.home === true });
     console.log(formatInitReport(report));
     if (report.rolledBack.length > 0 || report.refusedTracked.length > 0) {
-      process.exitCode = 1;
+      process.exitCode = EXIT.FAIL;
+    } else {
+      process.exitCode = EXIT.OK;
     }
   });
 
@@ -37,6 +43,7 @@ program
       dryRun: opts.dryRun === true,
     });
     console.log(formatRemoveReport(report));
+    process.exitCode = EXIT.OK;
   });
 
 program
@@ -44,8 +51,12 @@ program
   .description(
     "One-shot pass over known logs; exit 1 if any decoy token was found",
   )
-  .action(async () => {
-    const report = await runScan();
+  .option("--no-notify", "Do not send desktop notifications")
+  .action(async (opts: { notify?: boolean }) => {
+    const notify = opts.notify !== false;
+    const report = await runScan(
+      notify ? { onHit: (hit) => notifyHit(hit) } : {},
+    );
     console.log(formatScanReport(report));
     process.exitCode = report.exitCode;
   });
@@ -55,19 +66,23 @@ program
   .description(
     "Watch agent logs in the foreground and print alerts on decoy hits",
   )
-  .action(async () => {
+  .option("--no-notify", "Do not send desktop notifications")
+  .action(async (opts: { notify?: boolean }) => {
+    const notify = opts.notify !== false;
     const handle = await startWatch({
       onHit: (hit) => {
-        // Run 3: stdout only (token label + file). Desktop alerts are Run 4.
-        // Never print the full token.
+        // Never print the full token (alertLine uses tw…last4).
         console.log(hit.alertLine);
+        if (notify) {
+          notifyHit(hit);
+        }
       },
     });
     await handle.ready;
     console.log("tripwire: watching (Ctrl+C to stop)");
     const stop = async () => {
       await handle.close();
-      process.exit(0);
+      process.exit(EXIT.OK);
     };
     process.once("SIGINT", () => {
       void stop();
@@ -79,7 +94,37 @@ program
     await new Promise(() => undefined);
   });
 
+program
+  .command("status")
+  .description(
+    "List planted decoys, adapters, and recent hits (no full tokens)",
+  )
+  .option("--last <n>", "How many recent hits to show", "10")
+  .action(async (opts: { last?: string }) => {
+    const n = Number.parseInt(opts.last ?? "10", 10);
+    const report = await runStatus({
+      lastHits: Number.isFinite(n) && n >= 0 ? n : 10,
+    });
+    console.log(formatStatusReport(report));
+    process.exitCode = EXIT.OK;
+  });
+
+program
+  .command("test-alert")
+  .description(
+    "Fire one sample notification and stdout alert (no manifest/hits writes)",
+  )
+  .option("--no-notify", "Skip the desktop notification; print stdout only")
+  .action((opts: { notify?: boolean }) => {
+    const report = runTestAlert({ notify: opts.notify !== false });
+    console.log(report.alertLine);
+    if (report.error) {
+      console.warn(`tripwire: ${report.error}`);
+    }
+    process.exitCode = report.exitCode;
+  });
+
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : err);
-  process.exitCode = 1;
+  process.exitCode = EXIT.FAIL;
 });
