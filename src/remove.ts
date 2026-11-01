@@ -294,7 +294,21 @@ export async function runRemove(
           notes.push("Stripped agent-tripwire block from .gitignore.");
         }
 
-        if (tripwirePresent) {
+        if (tripwirePresent && hooks.keptBackups.length > 0) {
+          // Keep .tripwire/backups/ with the unrestored originals; drop the rest.
+          try {
+            const { readdir } = await import("node:fs/promises");
+            for (const e of await readdir(tw)) {
+              if (e === "backups") continue;
+              await rm(path.join(tw, e), { recursive: true, force: true });
+            }
+            notes.push(
+              `Kept ${tw}/backups/ because it holds original files that were not restored.`,
+            );
+          } catch {
+            // ignore
+          }
+        } else if (tripwirePresent) {
           try {
             await rm(tw, { recursive: true, force: true });
             removedDirs.push(tw);

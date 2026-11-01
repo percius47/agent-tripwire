@@ -1,4 +1,5 @@
 import { unlink } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { homeDecoyPlans, projectDecoyPlans } from "./decoys.js";
 import {
@@ -18,7 +19,7 @@ import {
   type Manifest,
 } from "./manifest.js";
 import { plantPlans, type PlantResult } from "./plant.js";
-import { pathsEqual } from "./path-util.js";
+import { canonicalizePathSync, pathsEqual } from "./path-util.js";
 import {
   defaultAllowlist,
   defaultProjectConfig,
@@ -154,10 +155,41 @@ async function secureGitIgnore(
   return { manifest: next, excludePath, rolledBack, kept };
 }
 
+/**
+ * Refuse project roots where project-level hook files would actually be the
+ * user's GLOBAL Cursor / Claude config (home dir, ~/.cursor, ~/.claude) or a
+ * filesystem root.
+ */
+export function unsafeProjectRootReason(
+  projectRoot: string,
+  homeDir: string = os.homedir(),
+): string | null {
+  const root = canonicalizePathSync(projectRoot);
+  const home = canonicalizePathSync(homeDir);
+  if (pathsEqual(root, home)) {
+    return `Refusing to init in your home directory (${root}): project hooks here would become your global ~/.cursor/hooks.json and ~/.claude/settings.json. Run init inside a project folder.`;
+  }
+  if (pathsEqual(root, path.parse(root).root)) {
+    return `Refusing to init at a filesystem root (${root}). Run init inside a project folder.`;
+  }
+  for (const dir of [".cursor", ".claude"]) {
+    const g = canonicalizePathSync(path.join(home, dir));
+    const rel = path.relative(g, root);
+    if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) {
+      return `Refusing to init inside ${g}: that is a global agent config folder. Run init inside a project folder.`;
+    }
+  }
+  return null;
+}
+
 export async function runInit(options: InitOptions = {}): Promise<InitReport> {
   const cwd = options.projectRoot ?? process.cwd();
   const resolved = resolveProjectRoot(cwd);
   const projectRoot = resolved.projectRoot;
+  const unsafe = unsafeProjectRootReason(projectRoot);
+  if (unsafe) {
+    throw new Error(unsafe);
+  }
   const includeHome = options.home === true;
   const notes: string[] = [];
   const refusedTracked: string[] = [];
@@ -235,7 +267,7 @@ export async function runInit(options: InitOptions = {}): Promise<InitReport> {
         );
       } else {
         notes.push(
-          `Updated ${excludePath} (local exclude; .gitignore untouched).`,
+          `Updated ${excludePath} (local git exclude).`,
         );
       }
     } else {

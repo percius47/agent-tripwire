@@ -1,12 +1,21 @@
+import path from "node:path";
 import { loadManifest, type DecoyRecord } from "../manifest.js";
+import { valuesForDecoy } from "../match.js";
+import { commandHasBoundedPathToken } from "../path-match.js";
 import { resolveProjectRoot } from "../git-exclude.js";
 import { canonicalizePathSync } from "../path-util.js";
 import {
   appendIncident,
+  defaultAllowlist,
+  defaultProjectConfig,
   loadAllowlist,
+  loadInstallMeta,
   loadProjectConfig,
   type IncidentRecord,
+  type ProjectAllowlist,
+  type ProjectConfig,
 } from "../project-state.js";
+import { scrubKnownValues, scrubText } from "./redact.js";
 import {
   evaluateHook,
   type HookAgent,
@@ -62,14 +71,36 @@ function detectAgent(
   return "unknown";
 }
 
+function isInside(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
 function resolveRoot(
   payload: Record<string, unknown>,
   agent: HookAgent,
 ): string {
   if (agent === "cursor") {
-    const roots = payload.workspace_roots;
-    if (Array.isArray(roots) && typeof roots[0] === "string" && roots[0]) {
-      return canonicalizePathSync(roots[0]);
+    const roots = Array.isArray(payload.workspace_roots)
+      ? (payload.workspace_roots as unknown[]).filter(
+          (r): r is string => typeof r === "string" && r.length > 0,
+        )
+      : [];
+    if (roots.length > 0) {
+      // Multi-root: pick the root that contains the file / cwd, else the first.
+      const probe =
+        typeof payload.file_path === "string"
+          ? payload.file_path
+          : typeof payload.cwd === "string"
+            ? payload.cwd
+            : undefined;
+      if (probe && path.isAbsolute(probe)) {
+        const hit = roots.find((r) =>
+          isInside(canonicalizePathSync(probe), canonicalizePathSync(r)),
+        );
+        if (hit) return canonicalizePathSync(hit);
+      }
+      return canonicalizePathSync(roots[0]!);
     }
   }
   if (typeof payload.cwd === "string" && payload.cwd.length > 0) {
@@ -134,14 +165,9 @@ function claudeResponse(decision: HookDecision): Record<string, unknown> {
         : permission;
 
   if (decisionPermission === "allow" && decision.rule === "real-secret") {
-    // Still return reason so it can surface in debug; allow proceeds.
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-        permissionDecisionReason: decision.userMessage,
-      },
-    };
+    // Alert-only: return no decision so Claude's normal permission prompt
+    // still applies. "allow" would auto-approve and skip the prompt.
+    return {};
   }
 
   if (decisionPermission === "allow") {
@@ -219,14 +245,106 @@ function extractFields(
   };
 }
 
-async function loadProjectDecoys(projectRoot: string): Promise<DecoyRecord[]> {
+/**
+ * Load every project-scope decoy (all projects). Decoys are matched by
+ * absolute path or token, so cwd / workspace root differences can't hide them.
+ */
+async function loadAllProjectDecoys(): Promise<DecoyRecord[]> {
   const manifest = await loadManifest();
   return manifest.decoys.filter(
-    (d) =>
-      d.scope === "project" &&
-      d.projectRoot !== undefined &&
-      canonicalizePathSync(d.projectRoot) === canonicalizePathSync(projectRoot),
+    (d) => d.scope === "project" && d.projectRoot !== undefined,
   );
+}
+
+interface LoadedState {
+  decoys: DecoyRecord[];
+  allowlist: ProjectAllowlist;
+  config: ProjectConfig;
+  /** Names of state files that failed to load (never means allow-all). */
+  errors: string[];
+}
+
+async function loadStateSafely(projectRoot: string): Promise<LoadedState> {
+  const errors: string[] = [];
+  const [decoys, allowlist, config] = await Promise.all([
+    loadAllProjectDecoys().catch(() => {
+      errors.push("manifest");
+      return [] as DecoyRecord[];
+    }),
+    loadAllowlist(projectRoot).catch(() => {
+      // Corrupt allowlist: ignore it entirely (no suppression), keep guarding.
+      errors.push("allow.json");
+      return defaultAllowlist();
+    }),
+    loadProjectConfig(projectRoot).catch(() => {
+      errors.push("config.json");
+      return defaultProjectConfig();
+    }),
+  ]);
+  return { decoys, allowlist, config, errors };
+}
+
+/**
+ * Fallback when the manifest can't be read: deny any access to the decoy
+ * paths recorded in this project's .tripwire/install.json.
+ */
+async function fallbackDecoyDeny(
+  projectRoot: string,
+  agent: HookAgent,
+  filePath: string | undefined,
+  command: string | undefined,
+): Promise<HookDecision | null> {
+  let rels: string[] = [];
+  try {
+    rels = (await loadInstallMeta(projectRoot))?.decoyRelPaths ?? [];
+  } catch {
+    rels = [];
+  }
+  // Last resort: Tripwire's default decoy names.
+  if (rels.length === 0) {
+    rels = [".env.backup", ".env.local.old", path.join("config", "secrets.legacy.json")];
+  }
+  const label = agent === "cursor" ? "Cursor" : "Claude Code";
+  for (const rel of rels) {
+    const abs = canonicalizePathSync(path.resolve(projectRoot, rel));
+    const relPosix = rel.split(/[\\/]/).join("/");
+    const fileHit =
+      filePath !== undefined &&
+      canonicalizePathSync(filePath).toLowerCase() === abs.toLowerCase();
+    const cmdHit =
+      command !== undefined &&
+      (commandHasBoundedPathToken(command, relPosix) ||
+        commandHasBoundedPathToken(command, rel) ||
+        commandHasBoundedPathToken(command, abs));
+    if (fileHit || cmdHit) {
+      const m = `Tripwire: ${label} tried to access a decoy secret (${relPosix}). Blocked. (Tripwire state was unreadable; fallback guard.)`;
+      return {
+        permission: "deny",
+        rule: "decoy",
+        severity: "high",
+        userMessage: m,
+        agentMessage: m,
+        target: relPosix,
+        decoyDeny: true,
+      };
+    }
+  }
+  return null;
+}
+
+/** Final redaction pass on everything that leaves the hook. */
+function sanitizeDecision(
+  decision: HookDecision,
+  decoys: DecoyRecord[],
+): HookDecision {
+  const known = decoys.flatMap((d) => valuesForDecoy(d));
+  const clean = (t: string) => scrubText(scrubKnownValues(t, known));
+  return {
+    ...decision,
+    userMessage: clean(decision.userMessage),
+    agentMessage: clean(decision.agentMessage),
+    target: clean(decision.target),
+  };
 }
 
 function shouldNotify(decision: HookDecision): boolean {
@@ -274,13 +392,14 @@ export async function runHookPayload(
     const agent: HookAgent = agentRaw === "unknown" ? "cursor" : agentRaw;
     const projectRoot = resolveRoot(payload, agent);
     const fields = extractFields(payload, agent);
-    const [decoys, allowlist, config] = await Promise.all([
-      loadProjectDecoys(projectRoot),
-      loadAllowlist(projectRoot),
-      loadProjectConfig(projectRoot),
-    ]);
+    // Relative tool paths (Claude Read) resolve against the agent's cwd.
+    if (fields.filePath && !path.isAbsolute(fields.filePath)) {
+      fields.filePath = path.resolve(fields.cwd ?? projectRoot, fields.filePath);
+    }
+    const state = await loadStateSafely(projectRoot);
+    const { decoys, allowlist, config } = state;
 
-    const decision = evaluateHook({
+    let decision = evaluateHook({
       agent,
       event: fields.event,
       projectRoot,
@@ -297,9 +416,22 @@ export async function runHookPayload(
         : {}),
     });
 
+    if (state.errors.includes("manifest") && !decision.decoyDeny) {
+      const fb = await fallbackDecoyDeny(
+        projectRoot,
+        agent,
+        fields.filePath,
+        fields.command,
+      );
+      if (fb) decision = fb;
+    }
+
+    decision = sanitizeDecision(decision, decoys);
+
     if (decision.decoyDeny) {
       decoyDenyFallback = decision;
     }
+    const incidentRoot = decision.decoyProjectRoot ?? projectRoot;
 
     const response =
       agent === "claude-code"
@@ -323,7 +455,11 @@ export async function runHookPayload(
             ? "alert"
             : decision.permission,
         target: decision.target,
-        verdict: decision.userMessage || decision.permission,
+        verdict:
+          (decision.userMessage || decision.permission) +
+          (state.errors.length > 0
+            ? ` [warning: unreadable Tripwire state: ${state.errors.join(", ")}]`
+            : ""),
         ...(decision.valueSha256 !== undefined
           ? { valueSha256: decision.valueSha256 }
           : {}),
@@ -332,7 +468,7 @@ export async function runHookPayload(
           : {}),
       };
       try {
-        await appendIncident(projectRoot, incident);
+        await appendIncident(incidentRoot, incident);
       } catch {
         // never break hook on log failure
       }

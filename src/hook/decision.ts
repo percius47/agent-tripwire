@@ -7,9 +7,8 @@ import {
   normalizeToolPathForCompare,
   toPosixPath,
 } from "../path-match.js";
-import { pathsEqual } from "../path-util.js";
 import type { ProjectAllowlist, ProjectConfig } from "../project-state.js";
-import { redactSecretValue } from "./redact.js";
+import { redactSecretValue, scrubText } from "./redact.js";
 import {
   commandReadsSecretPath,
   isNetworkExfilCommand,
@@ -36,6 +35,8 @@ export interface HookDecision {
   valuePreview?: string;
   /** True when this is a hard decoy deny that must survive fail-open. */
   decoyDeny: boolean;
+  /** Project root of the decoy that matched (incident goes there). */
+  decoyProjectRoot?: string;
 }
 
 export interface HookEvalInput {
@@ -55,16 +56,20 @@ export interface HookEvalInput {
   config: ProjectConfig;
 }
 
-function projectDecoys(
-  decoys: DecoyRecord[],
-  projectRoot: string,
-): DecoyRecord[] {
+/**
+ * All project-scope decoys, from every project. Matching is by absolute path
+ * or token, so a decoy is caught even when the agent's cwd / workspace root
+ * differs from the project where it was planted.
+ */
+function projectDecoys(decoys: DecoyRecord[]): DecoyRecord[] {
   return decoys.filter(
-    (d) =>
-      d.scope === "project" &&
-      d.projectRoot !== undefined &&
-      pathsEqual(d.projectRoot, projectRoot),
+    (d) => d.scope === "project" && d.projectRoot !== undefined,
   );
+}
+
+function relForDisplay(projectRoot: string, d: DecoyRecord): string {
+  const base = d.projectRoot ?? projectRoot;
+  return toPosixPath(path.relative(base, d.path)) || d.path;
 }
 
 function allowlisted(
@@ -121,7 +126,7 @@ function findDecoyTokenInText(
  * Evaluate a hook event locally. Prefer decoy deny (rule a) over other rules.
  */
 export function evaluateHook(input: HookEvalInput): HookDecision {
-  const decoys = projectDecoys(input.decoys, input.projectRoot);
+  const decoys = projectDecoys(input.decoys);
   const label = agentLabel(input.agent);
   const target =
     input.filePath ??
@@ -129,38 +134,21 @@ export function evaluateHook(input: HookEvalInput): HookDecision {
     input.toolName ??
     input.event;
 
-  if (
-    allowlisted(
-      input.allowlist,
-      input.projectRoot,
-      input.filePath ?? target,
-      input.command,
-    )
-  ) {
-    return {
-      permission: "allow",
-      rule: "allowlist",
-      severity: "info",
-      ...msg(label, "allowed an allowlisted action", target),
-      target,
-      decoyDeny: false,
-    };
-  }
-
   // --- Rule (a): decoy hit ---
   if (input.filePath) {
     const byPath = findDecoyForToolPath(input.filePath, decoys);
     if (byPath) {
-      const rel = toPosixPath(path.relative(input.projectRoot, byPath.path));
-      const m = msg(label, "tried to read a decoy secret", rel || byPath.path);
+      const rel = relForDisplay(input.projectRoot, byPath);
+      const m = msg(label, "tried to read a decoy secret", rel);
       return {
         permission: "deny",
         rule: "decoy",
         severity: "high",
         userMessage: `${m.userMessage} Blocked.`,
         agentMessage: `${m.agentMessage} Blocked.`,
-        target: rel || byPath.path,
+        target: rel,
         decoyDeny: true,
+        ...(byPath.projectRoot ? { decoyProjectRoot: byPath.projectRoot } : {}),
       };
     }
   }
@@ -174,14 +162,12 @@ export function evaluateHook(input: HookEvalInput): HookDecision {
   for (const blob of textBlobs) {
     const tokenHit = findDecoyTokenInText(blob, decoys);
     if (tokenHit) {
-      const rel = toPosixPath(
-        path.relative(input.projectRoot, tokenHit.decoy.path),
-      );
+      const rel = relForDisplay(input.projectRoot, tokenHit.decoy);
       const red = redactSecretValue(tokenHit.value);
       const m = msg(
         label,
         "tried to use a decoy secret token",
-        rel || tokenHit.decoy.path,
+        rel,
       );
       return {
         permission: "deny",
@@ -189,10 +175,13 @@ export function evaluateHook(input: HookEvalInput): HookDecision {
         severity: "high",
         userMessage: `${m.userMessage} Blocked.`,
         agentMessage: `${m.agentMessage} Blocked.`,
-        target: rel || tokenHit.decoy.path,
+        target: rel,
         valueSha256: red.valueSha256,
         valuePreview: red.valuePreview,
         decoyDeny: true,
+        ...(tokenHit.decoy.projectRoot
+          ? { decoyProjectRoot: tokenHit.decoy.projectRoot }
+          : {}),
       };
     }
   }
@@ -200,20 +189,17 @@ export function evaluateHook(input: HookEvalInput): HookDecision {
   if (input.command) {
     for (const d of decoys) {
       if (commandMentionsDecoy(input.command, d)) {
-        const rel = toPosixPath(path.relative(input.projectRoot, d.path));
-        const m = msg(
-          label,
-          "ran a command targeting a decoy secret",
-          rel || d.path,
-        );
+        const rel = relForDisplay(input.projectRoot, d);
+        const m = msg(label, "ran a command targeting a decoy secret", rel);
         return {
           permission: "deny",
           rule: "decoy",
           severity: "high",
           userMessage: `${m.userMessage} Blocked.`,
           agentMessage: `${m.agentMessage} Blocked.`,
-          target: rel || d.path,
+          target: rel,
           decoyDeny: true,
+          ...(d.projectRoot ? { decoyProjectRoot: d.projectRoot } : {}),
         };
       }
     }
@@ -224,27 +210,42 @@ export function evaluateHook(input: HookEvalInput): HookDecision {
     for (const d of decoys) {
       for (const v of valuesForDecoy(d)) {
         if (v.length > 0 && input.toolInputText.includes(v)) {
-          const rel = toPosixPath(path.relative(input.projectRoot, d.path));
+          const rel = relForDisplay(input.projectRoot, d);
           const red = redactSecretValue(v);
-          const m = msg(
-            label,
-            "sent a decoy token to an MCP tool",
-            rel || d.path,
-          );
+          const m = msg(label, "sent a decoy token to an MCP tool", rel);
           return {
             permission: "deny",
             rule: "decoy",
             severity: "high",
             userMessage: `${m.userMessage} Blocked.`,
             agentMessage: `${m.agentMessage} Blocked.`,
-            target: rel || d.path,
+            target: rel,
             valueSha256: red.valueSha256,
             valuePreview: red.valuePreview,
             decoyDeny: true,
+            ...(d.projectRoot ? { decoyProjectRoot: d.projectRoot } : {}),
           };
         }
       }
     }
+  }
+
+  if (
+    allowlisted(
+      input.allowlist,
+      input.projectRoot,
+      input.filePath ?? target,
+      input.command,
+    )
+  ) {
+    return {
+      permission: "allow",
+      rule: "allowlist",
+      severity: "info",
+      ...msg(label, "allowed an allowlisted action", scrubText(target)),
+      target: scrubText(target),
+      decoyDeny: false,
+    };
   }
 
   // --- Rule (c): exfil / MCP secret flow (before real-secret allow) ---
@@ -290,7 +291,7 @@ export function evaluateHook(input: HookEvalInput): HookDecision {
       permission === "ask"
         ? "may exfiltrate data over the network — confirm"
         : "tried a network command that may carry secrets",
-      input.command.slice(0, 120),
+      scrubText(input.command).slice(0, 120),
     );
     return {
       permission,
@@ -300,7 +301,7 @@ export function evaluateHook(input: HookEvalInput): HookDecision {
         permission === "deny" ? `${m.userMessage} Blocked.` : m.userMessage,
       agentMessage:
         permission === "deny" ? `${m.agentMessage} Blocked.` : m.agentMessage,
-      target: input.command.slice(0, 200),
+      target: scrubText(input.command).slice(0, 200),
       decoyDeny: false,
     };
   }
@@ -317,7 +318,7 @@ export function evaluateHook(input: HookEvalInput): HookDecision {
     const detail = input.filePath
       ? toPosixPath(path.relative(input.projectRoot, input.filePath)) ||
         input.filePath
-      : (input.command ?? target).slice(0, 120);
+      : scrubText(input.command ?? target).slice(0, 120);
     const m = msg(
       label,
       block
@@ -346,7 +347,7 @@ export function evaluateHook(input: HookEvalInput): HookDecision {
     severity: "info",
     userMessage: "",
     agentMessage: "",
-    target,
+    target: scrubText(target),
     decoyDeny: false,
   };
 }
