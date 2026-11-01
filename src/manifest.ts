@@ -7,6 +7,12 @@ export interface DecoyRecord {
   path: string;
   sha256: string;
   tokenId: string;
+  /**
+   * Every planted string that should trigger a hit for this decoy
+   * (primary tokenId plus any generated secret-likes). Older manifests
+   * may omit this; matchers fall back to `[tokenId]`.
+   */
+  matchValues?: string[];
   createdAt: string;
   scope: "project" | "home";
   /** Absolute project root when scope is project. */

@@ -1,4 +1,4 @@
-import { readFile, readdir, rmdir, rm, unlink } from "node:fs/promises";
+import { readFile, readdir, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import {
   gitTopLevel,
@@ -9,13 +9,17 @@ import {
 } from "./git-exclude.js";
 import { resolveProjectRoot } from "./git-exclude.js";
 import {
-  emptyManifest,
   loadManifest,
   saveManifest,
   type DecoyRecord,
   type Manifest,
 } from "./manifest.js";
-import { getHomeDir, getStateDir } from "./paths.js";
+import {
+  getHomeDir,
+  getManifestPath,
+  getOffsetsPath,
+  getStateDir,
+} from "./paths.js";
 import { sha256 } from "./plant.js";
 
 export interface RemoveOptions {
@@ -85,16 +89,32 @@ export async function removeDirIfEmpty(dir: string): Promise<boolean> {
   }
 }
 
-async function maybeClearStateDir(manifest: Manifest): Promise<boolean> {
+/**
+ * When no decoys / createdDirs remain: delete manifest.json and the watcher's
+ * offsets.json. Keep hits.jsonl (and any other user files) by default. Then
+ * rmdir the state dir only if it is empty — never recursive rm.
+ */
+async function maybeClearStateDir(manifest: Manifest): Promise<{
+  clearedManifest: boolean;
+  clearedOffsets: boolean;
+  removedStateDir: boolean;
+}> {
   if (manifest.decoys.length > 0 || (manifest.createdDirs?.length ?? 0) > 0) {
-    return false;
+    return {
+      clearedManifest: false,
+      clearedOffsets: false,
+      removedStateDir: false,
+    };
   }
-  try {
-    await rm(getStateDir(), { recursive: true, force: true });
-    return true;
-  } catch {
-    return false;
-  }
+  await deleteQuietly(getManifestPath());
+  await deleteQuietly(getOffsetsPath());
+  // hits.jsonl intentionally kept
+  const removedStateDir = await removeDirIfEmpty(getStateDir());
+  return {
+    clearedManifest: true,
+    clearedOffsets: true,
+    removedStateDir,
+  };
 }
 
 /**
@@ -220,10 +240,19 @@ export async function runRemove(
   if (dryRun) {
     notes.push("(dry-run) no files or manifest changes were written.");
   } else if (manifest.decoys.length === 0 && manifest.createdDirs.length === 0) {
-    await saveManifest(emptyManifest());
-    const cleared = await maybeClearStateDir(emptyManifest());
-    if (cleared) {
+    const cleared = await maybeClearStateDir(manifest);
+    if (cleared.clearedManifest) {
+      notes.push(`Deleted ${getManifestPath()}.`);
+    }
+    if (cleared.clearedOffsets) {
+      notes.push(`Deleted watcher offsets ${getOffsetsPath()}.`);
+    }
+    if (cleared.removedStateDir) {
       notes.push(`Removed empty state dir ${getStateDir()}.`);
+    } else {
+      notes.push(
+        `Kept state dir ${getStateDir()} (hits log or other files remain).`,
+      );
     }
   } else {
     await saveManifest(manifest);

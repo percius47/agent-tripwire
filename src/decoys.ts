@@ -8,8 +8,15 @@ export interface DecoyPlan {
   /** Relative label for reporting. */
   label: string;
   scope: "project" | "home";
-  /** Build file contents; returns the unique token id embedded in the file. */
-  render: () => { content: string; tokenId: string };
+  /**
+   * Build file contents. `tokenId` is the primary decoy id; `matchValues`
+   * lists every planted string that should trigger a hit (token + secrets).
+   */
+  render: () => {
+    content: string;
+    tokenId: string;
+    matchValues: string[];
+  };
 }
 
 /** Project decoys: sibling files only — never real .env. */
@@ -28,7 +35,7 @@ export function projectDecoyPlans(projectRoot: string): DecoyPlan[] {
           `AWS_SECRET_ACCESS_KEY=${secret}`,
           "",
         ].join("\n");
-        return { content, tokenId };
+        return { content, tokenId, matchValues: [tokenId, secret] };
       },
     },
     {
@@ -44,7 +51,7 @@ export function projectDecoyPlans(projectRoot: string): DecoyPlan[] {
           `API_TOKEN=${secret}`,
           "",
         ].join("\n");
-        return { content, tokenId };
+        return { content, tokenId, matchValues: [tokenId, secret] };
       },
     },
     {
@@ -63,7 +70,7 @@ export function projectDecoyPlans(projectRoot: string): DecoyPlan[] {
           null,
           2,
         )}\n`;
-        return { content, tokenId };
+        return { content, tokenId, matchValues: [tokenId, secret] };
       },
     },
   ];
@@ -86,7 +93,7 @@ export function homeDecoyPlans(): DecoyPlan[] {
           `aws_secret_access_key = ${secret}`,
           "",
         ].join("\n");
-        return { content, tokenId };
+        return { content, tokenId, matchValues: [tokenId, secret] };
       },
     },
     {
@@ -100,7 +107,7 @@ export function homeDecoyPlans(): DecoyPlan[] {
           `//registry.npmjs.org/:_authToken=${tokenId}`,
           "",
         ].join("\n");
-        return { content, tokenId };
+        return { content, tokenId, matchValues: [tokenId] };
       },
     },
   ];

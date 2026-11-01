@@ -53,17 +53,24 @@ export async function initGitRepo(dir: string): Promise<void> {
     const r = spawnSync("git", args, {
       cwd: dir,
       encoding: "utf8",
+      timeout: 15_000,
       env: {
         ...process.env,
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_TERMINAL_PROMPT: "0",
         GIT_OPTIONAL_LOCKS: "0",
+        GIT_ASKPASS: "",
+        GIT_EDITOR: "true",
+        GC_AUTO: "0",
         GIT_AUTHOR_NAME: "tripwire-test",
         GIT_AUTHOR_EMAIL: "tripwire@test",
         GIT_COMMITTER_NAME: "tripwire-test",
         GIT_COMMITTER_EMAIL: "tripwire@test",
       },
     });
+    if (r.error) {
+      throw new Error(`git ${args.join(" ")} error: ${r.error.message}`);
+    }
     if (r.status !== 0) {
       throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
     }
@@ -71,7 +78,9 @@ export async function initGitRepo(dir: string): Promise<void> {
   run(["init"]);
   run(["config", "user.email", "tripwire@test"]);
   run(["config", "user.name", "tripwire-test"]);
+  run(["config", "commit.gpgsign", "false"]);
+  run(["config", "tag.gpgsign", "false"]);
   await writeFile(path.join(dir, "README"), "test\n", "utf8");
   run(["add", "README"]);
-  run(["commit", "-m", "init"]);
+  run(["commit", "--no-gpg-sign", "-m", "init"]);
 }

@@ -1,10 +1,17 @@
 import { describe, expect, it, afterEach } from "vitest";
-import { readFile, writeFile, access, mkdir } from "node:fs/promises";
+import {
+  readFile,
+  writeFile,
+  access,
+  mkdir,
+  unlink,
+} from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { runInit } from "../src/init.js";
 import { runRemove } from "../src/remove.js";
 import { loadManifest } from "../src/manifest.js";
+import { getStateDir } from "../src/paths.js";
 import {
   EXCLUDE_BEGIN,
   EXCLUDE_END,
@@ -25,16 +32,24 @@ function git(cwd: string, args: string[]): string {
   const r = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
+    timeout: 15_000,
     env: {
       ...process.env,
       GIT_TERMINAL_PROMPT: "0",
       GIT_OPTIONAL_LOCKS: "0",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_ASKPASS: "",
+      GIT_EDITOR: "true",
+      GC_AUTO: "0",
       GIT_AUTHOR_NAME: "tripwire-test",
       GIT_AUTHOR_EMAIL: "tripwire@test",
       GIT_COMMITTER_NAME: "tripwire-test",
       GIT_COMMITTER_EMAIL: "tripwire@test",
     },
   });
+  if (r.error) {
+    throw new Error(`git ${args.join(" ")} error: ${r.error.message}`);
+  }
   if (r.status !== 0) {
     throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
   }
@@ -55,7 +70,7 @@ describe("git safety", () => {
       const gitignoreBefore = "# keep\n";
       await writeFile(path.join(project, ".gitignore"), gitignoreBefore, "utf8");
       git(project, ["add", ".gitignore"]);
-      git(project, ["commit", "-m", "gitignore"]);
+      git(project, ["commit", "--no-gpg-sign", "-m", "gitignore"]);
 
       const report = await runInit({ projectRoot: project });
       expect(report.gitRepo).toBe(true);
@@ -145,7 +160,7 @@ describe("git safety", () => {
     }
   });
 
-  it("refuses a tracked decoy path", async () => {
+  it("refuses a tracked decoy path", { timeout: 20_000 }, async () => {
     const home = await makeTempHome();
     const restore = useHome(home);
     try {
@@ -153,7 +168,7 @@ describe("git safety", () => {
       await initGitRepo(project);
       await writeFile(path.join(project, ".env.backup"), "tracked\n", "utf8");
       git(project, ["add", "-f", ".env.backup"]);
-      git(project, ["commit", "-m", "track decoy"]);
+      git(project, ["commit", "--no-gpg-sign", "-m", "track decoy"]);
 
       const report = await runInit({ projectRoot: project });
       expect(report.refusedTracked.length).toBe(1);
@@ -165,6 +180,39 @@ describe("git safety", () => {
       expect(await readFile(path.join(project, ".env.backup"), "utf8")).toBe(
         "tracked\n",
       );
+    } finally {
+      restore();
+    }
+  });
+
+  it("re-init after deleting one decoy keeps all three ignored", async () => {
+    const home = await makeTempHome();
+    const restore = useHome(home);
+    try {
+      const project = await makeTempProject(home);
+      await initGitRepo(project);
+      await runInit({ projectRoot: project });
+
+      const decoy = path.join(project, ".env.backup");
+      await unlink(decoy);
+
+      await runInit({ projectRoot: project });
+
+      const paths = [
+        ".env.backup",
+        ".env.local.old",
+        "config/secrets.legacy.json",
+      ];
+      for (const rel of paths) {
+        expect(isIgnored(project, rel), rel).toBe(true);
+      }
+
+      const exclude = await readFile(excludeFilePath(project), "utf8");
+      expect(exclude).toContain(".env.backup");
+      expect(exclude).toContain(".env.local.old");
+      expect(exclude).toContain("config/secrets.legacy.json");
+
+      expect(git(project, ["status", "--porcelain"]).trim()).toBe("");
     } finally {
       restore();
     }
@@ -183,7 +231,7 @@ describe("remove", () => {
       const envBefore = await writeFixture(envPath, "REAL=1\n");
       const giBefore = await writeFixture(gitignorePath, "node_modules/\n");
       git(project, ["add", ".gitignore"]);
-      git(project, ["commit", "-m", "gi"]);
+      git(project, ["commit", "--no-gpg-sign", "-m", "gi"]);
 
       await runInit({ projectRoot: project });
       const remove1 = await runRemove({ projectRoot: project });
@@ -262,6 +310,33 @@ describe("remove", () => {
       await expect(
         access(path.join(home, ".aws", "credentials.bak")),
       ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      restore();
+    }
+  });
+
+  it("extra file in state dir survives remove (no recursive rm)", async () => {
+    const home = await makeTempHome();
+    const restore = useHome(home);
+    try {
+      const project = await makeTempProject(home);
+      await runInit({ projectRoot: project });
+
+      const stateDir = getStateDir();
+      const extra = path.join(stateDir, "user-notes.txt");
+      const hits = path.join(stateDir, "hits.jsonl");
+      await writeFile(extra, "keep me\n", "utf8");
+      await writeFile(hits, "{\"tokenId\":\"twTEST\"}\n", "utf8");
+
+      await runRemove({ projectRoot: project });
+
+      expect(await readFile(extra, "utf8")).toBe("keep me\n");
+      expect(await readFile(hits, "utf8")).toBe('{"tokenId":"twTEST"}\n');
+      await expect(access(path.join(stateDir, "manifest.json"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      // State dir itself must still exist because extra + hits remain.
+      await access(stateDir);
     } finally {
       restore();
     }
