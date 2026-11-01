@@ -192,8 +192,13 @@ function stripClaudeSettings(doc: JsonObject): JsonObject {
       if (nested.length === 0 && (group.hooks as unknown[]).some(isOurEntry)) {
         return false;
       }
-      group.hooks = nested;
       return true;
+    }).map((group) => {
+      if (!isObject(group) || !Array.isArray(group.hooks)) return group;
+      return {
+        ...group,
+        hooks: (group.hooks as unknown[]).filter((h) => !isOurEntry(h)),
+      };
     });
     if (next.length === 0) {
       delete hooks.PreToolUse;
@@ -244,7 +249,12 @@ export async function installProjectHooks(
   // Cursor
   const cursorAbs = path.join(projectRoot, CURSOR_HOOKS_REL);
   const cursorBefore = await readJsonFile(cursorAbs);
-  if (cursorBefore.exists) {
+  const cursorInvalid = cursorBefore.exists && !isObject(cursorBefore.value);
+  if (cursorInvalid) {
+    notes.push(
+      `WARNING: ${CURSOR_HOOKS_REL} exists but is not valid JSON; left untouched. Cursor is NOT guarded until you fix it and rerun init.`,
+    );
+  } else if (cursorBefore.exists) {
     await backupIfExists(projectRoot, CURSOR_HOOKS_REL, backups);
   } else {
     createdFiles.add(CURSOR_HOOKS_REL);
@@ -253,15 +263,22 @@ export async function installProjectHooks(
     cursorBefore.exists && isObject(cursorBefore.value)
       ? (cursorBefore.value as JsonObject)
       : { version: 1 };
-  // Re-strip then re-add so init is idempotent.
-  const cursorNext = ensureCursorHooks(stripCursorHooks(cursorBase));
-  await writeJson(cursorAbs, cursorNext);
-  notes.push(`Wrote ${CURSOR_HOOKS_REL}`);
+  if (!cursorInvalid) {
+    // Re-strip then re-add so init is idempotent.
+    const cursorNext = ensureCursorHooks(stripCursorHooks(cursorBase));
+    await writeJson(cursorAbs, cursorNext);
+    notes.push(`Wrote ${CURSOR_HOOKS_REL}`);
+  }
 
   // Claude
   const claudeAbs = path.join(projectRoot, CLAUDE_SETTINGS_REL);
   const claudeBefore = await readJsonFile(claudeAbs);
-  if (claudeBefore.exists) {
+  const claudeInvalid = claudeBefore.exists && !isObject(claudeBefore.value);
+  if (claudeInvalid) {
+    notes.push(
+      `WARNING: ${CLAUDE_SETTINGS_REL} exists but is not valid JSON; left untouched. Claude Code is NOT guarded until you fix it and rerun init.`,
+    );
+  } else if (claudeBefore.exists) {
     await backupIfExists(projectRoot, CLAUDE_SETTINGS_REL, backups);
   } else {
     createdFiles.add(CLAUDE_SETTINGS_REL);
@@ -270,9 +287,11 @@ export async function installProjectHooks(
     claudeBefore.exists && isObject(claudeBefore.value)
       ? (claudeBefore.value as JsonObject)
       : {};
-  const claudeNext = ensureClaudeSettings(stripClaudeSettings(claudeBase));
-  await writeJson(claudeAbs, claudeNext);
-  notes.push(`Wrote ${CLAUDE_SETTINGS_REL}`);
+  if (!claudeInvalid) {
+    const claudeNext = ensureClaudeSettings(stripClaudeSettings(claudeBase));
+    await writeJson(claudeAbs, claudeNext);
+    notes.push(`Wrote ${CLAUDE_SETTINGS_REL}`);
+  }
 
   const meta: InstallMeta = {
     version: 1,
@@ -298,6 +317,8 @@ export interface HooksRemoveReport {
   deleted: string[];
   rewritten: string[];
   notes: string[];
+  /** Absolute paths of backups that were kept because they weren't restored. */
+  keptBackups: string[];
 }
 
 async function restoreOrStrip(options: {
@@ -317,8 +338,18 @@ async function restoreOrStrip(options: {
     const backupAbs = path.join(options.projectRoot, options.backupRel);
     try {
       const backupRaw = await readFile(backupAbs);
-      const backupParsed = JSON.parse(backupRaw.toString("utf8")) as unknown;
-      if (isObject(backupParsed) && isObject(current.value)) {
+      let backupParsed: unknown = null;
+      try {
+        backupParsed = JSON.parse(backupRaw.toString("utf8")) as unknown;
+      } catch {
+        backupParsed = null;
+      }
+      if (!isObject(backupParsed)) {
+        // Original was not valid JSON: put the exact original bytes back.
+        await writeFile(abs, backupRaw);
+        return "restored";
+      }
+      if (isObject(current.value)) {
         const strippedCurrent = options.strip(current.value);
         const strippedBackup = options.strip(backupParsed);
         // If after stripping ours, current equals backup (with ours also stripped = original),
@@ -389,6 +420,14 @@ export async function removeProjectHooks(
     isEmpty: claudeEmptyAfterStrip,
   });
   if (claudeResult === "restored") restored.push(CLAUDE_SETTINGS_REL);
+  // Backups we did not restore byte-exact are kept, never deleted.
+  const keepBackups = new Set<string>();
+  if (cursorResult !== "restored" && backups[CURSOR_HOOKS_REL]) {
+    keepBackups.add(path.basename(backups[CURSOR_HOOKS_REL]!));
+  }
+  if (claudeResult !== "restored" && backups[CLAUDE_SETTINGS_REL]) {
+    keepBackups.add(path.basename(backups[CLAUDE_SETTINGS_REL]!));
+  }
   else if (claudeResult === "deleted") deleted.push(CLAUDE_SETTINGS_REL);
   else if (claudeResult === "rewritten") rewritten.push(CLAUDE_SETTINGS_REL);
 
@@ -405,14 +444,30 @@ export async function removeProjectHooks(
     const bdir = projectBackupsDir(projectRoot);
     const entries = await readdir(bdir).catch(() => [] as string[]);
     for (const e of entries) {
+      if (keepBackups.has(e)) continue;
       await rm(path.join(bdir, e), { force: true });
+    }
+    if (keepBackups.size > 0) {
+      notes.push(
+        `Kept original backup(s) in ${bdir} (not restored automatically): ${[...keepBackups].join(", ")}`,
+      );
     }
     await removeDirIfEmpty(bdir);
   } catch {
     // ignore
   }
 
-  return { restored, deleted, rewritten, notes };
+  return {
+    restored,
+    deleted,
+    rewritten,
+    notes,
+    keptBackups: [...keepBackups].map((b) => path.join(bdirFor(projectRoot), b)),
+  };
+}
+
+function bdirFor(projectRoot: string): string {
+  return projectBackupsDir(projectRoot);
 }
 
 export { CURSOR_HOOKS_REL, CLAUDE_SETTINGS_REL, CLAUDE_MATCHERS };

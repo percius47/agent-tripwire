@@ -39,7 +39,7 @@ export interface IncidentRecord {
   agent: "cursor" | "claude-code" | "unknown";
   sessionId: string;
   transcriptPath: string;
-  rule: "decoy" | "real-secret" | "exfil" | "allowlist" | "none";
+  rule: "decoy" | "real-secret" | "exfil" | "tamper" | "allowlist" | "none";
   severity: "high" | "medium" | "low" | "info";
   action: "deny" | "ask" | "allow" | "alert";
   target: string;

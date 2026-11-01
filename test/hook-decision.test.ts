@@ -129,7 +129,7 @@ describe("hook decision rules", () => {
     expect(claude.rule).toBe("exfil");
   });
 
-  it("allowlist suppresses decoy path", () => {
+  it("allowlist never suppresses a decoy path", () => {
     const d = evaluateHook({
       agent: "cursor",
       event: "beforeReadFile",
@@ -140,8 +140,8 @@ describe("hook decision rules", () => {
       allowlist: { version: 1, paths: [".env.backup"], commands: [] },
       config: defaultProjectConfig(),
     });
-    expect(d.permission).toBe("allow");
-    expect(d.rule).toBe("allowlist");
+    expect(d.permission).toBe("deny");
+    expect(d.rule).toBe("decoy");
   });
 
   it("redaction never includes the raw secret", () => {
@@ -218,8 +218,9 @@ describe("hook payload fixtures", () => {
         commands: [],
       });
       const listed = await runHookPayload(denyRaw);
-      expect(listed.decision.rule).toBe("allowlist");
-      expect(listed.decision.permission).toBe("allow");
+      // Decoys win over the allowlist (gate fix).
+      expect(listed.decision.rule).toBe("decoy");
+      expect(listed.decision.permission).toBe("deny");
     } finally {
       restore();
     }

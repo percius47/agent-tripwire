@@ -11,6 +11,14 @@ import { formatScanReport, runScan } from "./scan.js";
 import { formatStatusReport, runStatus } from "./status.js";
 import { runTestAlert } from "./test-alert.js";
 import { startWatch } from "./watch.js";
+import {
+  activePause,
+  confirmHumanPause,
+  DEFAULT_PAUSE,
+  parseDuration,
+  pauseProject,
+  resumeProject,
+} from "./pause.js";
 
 const program = new Command();
 
@@ -50,6 +58,53 @@ program
       dryRun: opts.dryRun === true,
     });
     console.log(formatRemoveReport(report));
+    process.exitCode = EXIT.OK;
+  });
+
+program
+  .command("pause")
+  .description(
+    "Snooze blocking in this project for a while (max 24h). Reads are still logged; resumes on its own.",
+  )
+  .option("--for <duration>", "How long, e.g. 15m, 2h, 1h30m", DEFAULT_PAUSE)
+  .action(async (opts: { for?: string }) => {
+    const { projectRoot } = resolveProjectRoot(process.cwd());
+    const dur = opts.for ?? DEFAULT_PAUSE;
+    if (parseDuration(dur) === null) {
+      console.error(`Invalid duration "${dur}". Use e.g. 15m, 2h, 1h30m.`);
+      process.exitCode = EXIT.FAIL;
+      return;
+    }
+    const confirm = await confirmHumanPause();
+    if (!confirm.ok) {
+      console.error(confirm.reason);
+      process.exitCode = EXIT.FAIL;
+      return;
+    }
+    try {
+      const state = await pauseProject(projectRoot, dur);
+      console.log(
+        `Tripwire paused in ${projectRoot} until ${new Date(state.until).toLocaleString()}. Nothing is blocked until then, but access is still logged. Run \`agent-tripwire resume\` to turn it back on now.`,
+      );
+      process.exitCode = EXIT.OK;
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = EXIT.FAIL;
+    }
+  });
+
+program
+  .command("resume")
+  .description("End a pause now and turn blocking back on")
+  .action(async () => {
+    const { projectRoot } = resolveProjectRoot(process.cwd());
+    const was = await activePause(projectRoot);
+    await resumeProject(projectRoot);
+    console.log(
+      was
+        ? `Tripwire resumed in ${projectRoot}. Blocking is back on.`
+        : `Tripwire was not paused in ${projectRoot}. Blocking is on.`,
+    );
     process.exitCode = EXIT.OK;
   });
 

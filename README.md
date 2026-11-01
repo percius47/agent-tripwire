@@ -46,14 +46,30 @@ Requires Node.js 20+. Works on Windows, macOS, and Linux.
 | **(b) Real secret** | Reads of `.env*`, `*.pem`, `*.key`, `id_rsa*`, `.npmrc`, `~/.ssh`, `~/.aws`, etc., or shell that reads them | **ALERT + allow** by default (set `.tripwire/config.json` → `"blockRealSecrets": true` to deny) |
 | **(c) Exfil / MCP** | Secret-looking value or decoy flowing into MCP input, or network command carrying a file/env (`curl` / `wget` / `Invoke-WebRequest` / `nc`) | Cursor → **`ask`**; Claude → **deny** with reason |
 
-Allowlist: `.tripwire/allow.json` (`paths`, `commands`).
+Allowlist: `.tripwire/allow.json` (`paths`, `commands`). The allowlist can silence rules (b) and (c) only; it never suppresses a decoy hit.
 
-Incidents append to `.tripwire/incidents.log` with time, agent, session/conversation id, transcript path, rule, severity, action, target, verdict. Secret values are **never** stored — only path, sha256, and a redacted preview (first 4 characters + length).
+Incidents append to `.tripwire/incidents.log` with time, agent, session/conversation id, transcript path, rule, severity, action, target, verdict. Secret values are **never** stored — only path, sha256, and a redacted preview (first 4 characters + length). Shell commands and MCP input are scrubbed for secret-looking values (key=value, bearer tokens, URL passwords, known key prefixes, long opaque strings, decoy tokens) before they reach the log, the pop-up, or the IDE message. Scrubbing is pattern-based, so an unusual secret format can still slip through.
 
-Notifications use `node-notifier` (Windows toast, macOS Notification Center, Linux notify-send). Notification failure never breaks the hook. The hook fails **open** on its own crash, except decoy rule (a) when it was already evaluated.
+Notifications use `node-notifier` (Windows toast, macOS Notification Center, Linux notify-send). Notification failure never breaks the hook. The hook fails **open** on its own crash, except decoy rule (a) when it was already evaluated. If `.tripwire/allow.json` or `config.json` is unreadable, defaults are used (no allowlist), not allow-all. If the decoy manifest is unreadable, the hook still denies the decoy paths recorded in `.tripwire/install.json` and logs a warning.
+
+## Snooze
+
+```bash
+agent-tripwire pause --for 30m   # default 30m, max 24h
+agent-tripwire resume            # turn blocking back on now
+```
+
+`pause` asks you to type back a random 4-letter code, and it refuses to run without an interactive terminal or inside an AI agent's shell (`CLAUDECODE` / `CURSOR_AGENT` set), so an agent can't snooze it for you.
+
+While paused, nothing in this project is blocked and no pop-ups fire, but every hit is still written to `.tripwire/incidents.log` marked `paused`. The pause ends on its own. If an agent runs `agent-tripwire pause` / `remove` or writes Tripwire's state or hook files from the shell, the hook flags it as **tamper** (Cursor asks you, Claude Code denies), and that rule is never snoozed. Writes through an agent's own edit tools aren't hooked yet.
 
 ## Honest limits
 
+- **This is a tripwire, not a sandbox.** It flags and blocks the specific actions it can see; it does not isolate the agent.
+- Claude Code hooks cover `Read`, `Bash`, `PowerShell` and MCP tools. `Grep`, `Glob`, `Edit`, `Write`, `WebFetch` and `Task` are not hooked yet, and files you `@`-mention are attached without a hook call.
+- Cursor hooks cover file reads, shell commands and MCP calls (`beforeReadFile`, `beforeShellExecution`, `beforeMCPExecution`).
+- The hook command is `agent-tripwire-hook` on your PATH. If it isn't on PATH, the agent's action proceeds (fail open).
+- `init` refuses to run in your home folder, in `~/.cursor` / `~/.claude`, or at a filesystem root, so it can't overwrite your global agent config.
 - Hooks only see what the agent asks to do through the hooked APIs. A **disguised shell command** can slip past; keep `agent-tripwire watch` / `scan` as a transcript backstop.
 - Cursor **cloud** agents: project `.cursor/hooks.json` command hooks are loaded for cloud work, but behavior is not identical to desktop (e.g. `beforeMCPExecution` timing / availability differs; user-level `~/.cursor/hooks.json` is unavailable). Check [Cursor hooks docs](https://cursor.com/docs/agent/hooks).
 - Claude Code cloud sessions do not use your local `~/.claude/settings.json`; project `.claude/settings.json` can apply when that tree is present. Check [Claude Code hooks docs](https://docs.claude.com/en/docs/claude-code/hooks).
