@@ -474,7 +474,9 @@ export async function runHookPayload(
           pausedUntil !== null ||
           (decision.permission === "allow" && decision.rule === "real-secret")
             ? "alert"
-            : decision.permission,
+            : agent === "claude-code" && decision.permission === "ask"
+              ? "deny" // claudeResponse turns ask into deny; log what happened
+              : decision.permission,
         target: decision.target,
         verdict:
           (decision.userMessage || decision.permission) +
