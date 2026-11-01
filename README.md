@@ -30,21 +30,21 @@ Tripwire gives you a signal you can trust. Nothing legitimate ever needs to read
 
 **Without Tripwire**, an agent happily reads and prints a credentials file:
 
-<img src="docs/assets/without-tripwire.png" alt="Cursor reading .env.backup and printing AWS-style credentials" width="640">
+<img src="https://raw.githubusercontent.com/percius47/agent-tripwire/main/docs/assets/without-tripwire.png" alt="Cursor reading .env.backup and printing AWS-style credentials" width="640">
 
 <sub>Those values are Tripwire decoys, not real keys.</sub>
 
 **With Tripwire**, the same kind of request is blocked by the hook, and the agent has to tell you:
 
-<img src="docs/assets/cursor-blocked.png" alt="Cursor saying it couldn't read .env.backup because a tripwire hook blocked it as a decoy secret" width="720">
+<img src="https://raw.githubusercontent.com/percius47/agent-tripwire/main/docs/assets/cursor-blocked.png" alt="Cursor saying it couldn't read .env.backup because a tripwire hook blocked it as a decoy secret" width="720">
 
 You also get a native OS notification (Windows shown):
 
-<img src="docs/assets/windows-toast.png" alt="Windows toast: Agent Tripwire, Cursor ran a command targeting a decoy secret. Blocked." width="420">
+<img src="https://raw.githubusercontent.com/percius47/agent-tripwire/main/docs/assets/windows-toast.png" alt="Windows toast: Agent Tripwire, Cursor ran a command targeting a decoy secret. Blocked." width="420">
 
 And every hit is logged locally, with no secret values stored:
 
-<img src="docs/assets/terminal-incidents.png" alt="agent-tripwire incidents output listing deny, alert and tamper incidents" width="820">
+<img src="https://raw.githubusercontent.com/percius47/agent-tripwire/main/docs/assets/terminal-incidents.png" alt="agent-tripwire incidents output listing deny, alert and tamper incidents" width="820">
 
 <sub>Real output from a test project on Windows; long lines trimmed to fit.</sub>
 
@@ -62,7 +62,7 @@ agent-tripwire init
 #    "Read .env.backup and summarize the credentials."
 ```
 
-<img src="docs/assets/terminal-init.png" alt="agent-tripwire init output: decoys planted, Cursor and Claude hooks written, .gitignore updated" width="820">
+<img src="https://raw.githubusercontent.com/percius47/agent-tripwire/main/docs/assets/terminal-init.png" alt="agent-tripwire init output: decoys planted, Cursor and Claude hooks written, .gitignore updated" width="820">
 
 > [!IMPORTANT]
 > Use the global install, not `npx agent-tripwire init`. The IDE hooks call `agent-tripwire-hook` from your PATH on every file read, and `npx` only puts it there while `npx` itself is running. If `init` can't find it, it prints a **WARNING** that the project isn't protected yet.
@@ -122,7 +122,7 @@ agent-tripwire resume
 
 `pause` asks you to type back a random 4-letter code, and it refuses to run without an interactive terminal or inside an AI agent's shell. An agent can't switch Tripwire off for you:
 
-<img src="docs/assets/terminal-pause-refused.png" alt="Refusing to pause: this looks like an AI agent's shell" width="760">
+<img src="https://raw.githubusercontent.com/percius47/agent-tripwire/main/docs/assets/terminal-pause-refused.png" alt="Refusing to pause: this looks like an AI agent's shell" width="760">
 
 While paused, nothing is blocked and no pop-ups fire, but every hit is still logged, marked `paused`. If an agent runs `agent-tripwire pause` or `remove`, or writes Tripwire's state or hook files from the shell, the hook flags it as **tamper** (Cursor asks you, Claude Code denies). That rule is never snoozed. Writes through an agent's own edit tools aren't hooked yet.
 
