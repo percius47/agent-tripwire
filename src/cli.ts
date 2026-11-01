@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { EXIT } from "./exit-codes.js";
+import { resolveProjectRoot } from "./git-exclude.js";
+import { formatIncidentsCli } from "./hook/run.js";
 import { formatInitReport, runInit } from "./init.js";
 import { notifyHit } from "./notify.js";
+import { loadIncidents } from "./project-state.js";
 import { formatRemoveReport, runRemove } from "./remove.js";
 import { formatScanReport, runScan } from "./scan.js";
 import { formatStatusReport, runStatus } from "./status.js";
@@ -14,13 +17,15 @@ const program = new Command();
 program
   .name("agent-tripwire")
   .description(
-    "Plant non-functional decoy credentials and alert when a coding agent reads them",
+    "Plant decoy credentials and block/alert when Cursor or Claude Code touch them",
   )
-  .version("0.1.0");
+  .version("0.2.0");
 
 program
   .command("init")
-  .description("Plant project decoys and write the manifest")
+  .description(
+    "Plant project decoys, write project hooks (.cursor / .claude), and create .tripwire/",
+  )
   .option("--home", "Also plant home-level decoys (~/.aws, ~/.npmrc area)")
   .action(async (opts: { home?: boolean }) => {
     const report = await runInit({ home: opts.home === true });
@@ -34,7 +39,9 @@ program
 
 program
   .command("remove")
-  .description("Delete Tripwire-created decoys whose hashes still match")
+  .description(
+    "Remove decoys, strip project hooks, restore backups, and delete .tripwire/",
+  )
   .option("--home", "Also remove home-level decoys")
   .option("--dry-run", "Print the plan without deleting or writing")
   .action(async (opts: { home?: boolean; dryRun?: boolean }) => {
@@ -43,6 +50,24 @@ program
       dryRun: opts.dryRun === true,
     });
     console.log(formatRemoveReport(report));
+    process.exitCode = EXIT.OK;
+  });
+
+program
+  .command("incidents")
+  .description("Show .tripwire/incidents.log (latest first)")
+  .option("--severity <level>", "Filter by severity (high|medium|low|info)")
+  .option("--limit <n>", "Max rows", "50")
+  .action(async (opts: { severity?: string; limit?: string }) => {
+    const { projectRoot } = resolveProjectRoot(process.cwd());
+    const n = Number.parseInt(opts.limit ?? "50", 10);
+    const incidents = await loadIncidents(projectRoot);
+    console.log(
+      formatIncidentsCli(incidents, {
+        ...(opts.severity !== undefined ? { severity: opts.severity } : {}),
+        limit: Number.isFinite(n) && n >= 0 ? n : 50,
+      }),
+    );
     process.exitCode = EXIT.OK;
   });
 

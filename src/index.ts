@@ -116,3 +116,29 @@ export { notifyHit, sampleAlertLine } from "./notify.js";
 export { runStatus, formatStatusReport } from "./status.js";
 export { runTestAlert } from "./test-alert.js";
 export { EXIT } from "./exit-codes.js";
+export {
+  evaluateHook,
+  type HookDecision,
+  type HookEvalInput,
+  type HookPermission,
+} from "./hook/decision.js";
+export { runHookPayload, formatIncidentsCli } from "./hook/run.js";
+export { redactSecretValue, scrubKnownValues } from "./hook/redact.js";
+export {
+  installProjectHooks,
+  removeProjectHooks,
+} from "./hooks-install.js";
+export {
+  loadIncidents,
+  appendIncident,
+  loadProjectConfig,
+  loadAllowlist,
+  type IncidentRecord,
+  type ProjectConfig,
+} from "./project-state.js";
+export {
+  writeGitignoreBlock,
+  stripGitignoreBlock,
+  GITIGNORE_BEGIN,
+  GITIGNORE_END,
+} from "./gitignore-project.js";

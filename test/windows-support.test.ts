@@ -239,7 +239,11 @@ describe("Windows 8.3 short-name canonicalization", () => {
         const projectShort = path.join(rawHome, "projects", "demo");
         // Exercise remove.ts sameProject via pathsEqual(short, long).
         const report = await runRemove({ projectRoot: projectShort });
-        expect(report.deleted).toHaveLength(3);
+        // Three decoys; may also delete a Tripwire-created .gitignore.
+        const decoyDeleted = report.deleted.filter(
+          (p) => !p.replace(/\\/g, "/").endsWith(".gitignore"),
+        );
+        expect(decoyDeleted).toHaveLength(3);
         expect(report.keptModified).toHaveLength(0);
       } finally {
         restore();

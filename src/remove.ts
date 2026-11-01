@@ -1,4 +1,4 @@
-import { readFile, readdir, rmdir, unlink } from "node:fs/promises";
+import { access, readFile, readdir, rm, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import {
   gitTopLevel,
@@ -8,6 +8,8 @@ import {
   writeExcludeBlock,
 } from "./git-exclude.js";
 import { resolveProjectRoot } from "./git-exclude.js";
+import { stripGitignoreBlock } from "./gitignore-project.js";
+import { removeProjectHooks } from "./hooks-install.js";
 import {
   loadManifest,
   saveManifest,
@@ -22,6 +24,7 @@ import {
 } from "./paths.js";
 import { isPathInside, pathsEqual } from "./path-util.js";
 import { sha256 } from "./plant.js";
+import { loadInstallMeta, tripwireDir } from "./project-state.js";
 
 export interface RemoveOptions {
   projectRoot?: string;
@@ -39,6 +42,9 @@ export interface RemoveReport {
   missing: string[];
   removedDirs: string[];
   excludeStripped: boolean;
+  gitignoreStripped: boolean;
+  hooksRestored: string[];
+  hooksDeleted: string[];
   notes: string[];
 }
 
@@ -213,17 +219,22 @@ export async function runRemove(
   }
 
   let excludeStripped = false;
+  let gitignoreStripped = false;
+  const hooksRestored: string[] = [];
+  const hooksDeleted: string[] = [];
+
+  const remainingForProject = manifest.decoys.filter(
+    (d) =>
+      d.scope === "project" &&
+      d.projectRoot !== undefined &&
+      pathsEqual(d.projectRoot, projectRoot),
+  );
+
   if (isGitRepo(projectRoot)) {
     const repoRoot = gitTopLevel(projectRoot);
     if (repoRoot) {
-      const remainingForRepo = manifest.decoys.filter(
-        (d) =>
-          d.scope === "project" &&
-          d.projectRoot !== undefined &&
-          pathsEqual(d.projectRoot, projectRoot),
-      );
       if (!dryRun) {
-        if (remainingForRepo.length === 0) {
+        if (remainingForProject.length === 0) {
           excludeStripped = await stripExcludeBlock(repoRoot);
           if (excludeStripped) {
             notes.push(
@@ -231,19 +242,70 @@ export async function runRemove(
             );
           }
         } else {
-          const rels = remainingForRepo.map((d) =>
+          const rels = remainingForProject.map((d) =>
             toRepoRelative(repoRoot, d.path),
           );
           await writeExcludeBlock(repoRoot, rels);
           notes.push(
-            `Rewrote exclude block for ${remainingForRepo.length} remaining decoy(s).`,
+            `Rewrote exclude block for ${remainingForProject.length} remaining decoy(s).`,
           );
         }
       } else {
         notes.push(
-          remainingForRepo.length === 0
+          remainingForProject.length === 0
             ? "(dry-run) would strip agent-tripwire exclude block"
-            : `(dry-run) would rewrite exclude for ${remainingForRepo.length} remaining decoy(s)`,
+            : `(dry-run) would rewrite exclude for ${remainingForProject.length} remaining decoy(s)`,
+        );
+      }
+    }
+  }
+
+  // Project hooks + gitignore + .tripwire — only when no project decoys remain
+  // and an install is still present (keeps second remove a true no-op).
+  if (remainingForProject.length === 0) {
+    const installMeta = await loadInstallMeta(projectRoot);
+    const tw = tripwireDir(projectRoot);
+    let tripwirePresent = false;
+    try {
+      await access(tw);
+      tripwirePresent = true;
+    } catch {
+      tripwirePresent = false;
+    }
+
+    if (installMeta !== null || tripwirePresent) {
+      const weCreatedGitignore =
+        installMeta?.createdFiles.includes(".gitignore") === true;
+
+      if (!dryRun) {
+        const hooks = await removeProjectHooks(projectRoot);
+        hooksRestored.push(...hooks.restored);
+        hooksDeleted.push(...hooks.deleted);
+        notes.push(...hooks.notes);
+
+        const gi = await stripGitignoreBlock(projectRoot, {
+          deleteIfEmpty: weCreatedGitignore,
+        });
+        gitignoreStripped = gi.stripped;
+        if (gi.deleted) {
+          deleted.push(path.join(projectRoot, ".gitignore"));
+          notes.push("Deleted .gitignore (was created by Tripwire and empty).");
+        } else if (gi.stripped) {
+          notes.push("Stripped agent-tripwire block from .gitignore.");
+        }
+
+        if (tripwirePresent) {
+          try {
+            await rm(tw, { recursive: true, force: true });
+            removedDirs.push(tw);
+            notes.push(`Removed ${tw}`);
+          } catch {
+            // ignore
+          }
+        }
+      } else {
+        notes.push(
+          "(dry-run) would remove project hooks, gitignore block, and .tripwire/",
         );
       }
     }
@@ -274,7 +336,9 @@ export async function runRemove(
     deleted.length === 0 &&
     keptModified.length === 0 &&
     missing.length === 0 &&
-    removedDirs.length === 0
+    removedDirs.length === 0 &&
+    hooksRestored.length === 0 &&
+    hooksDeleted.length === 0
   ) {
     notes.push("Nothing to remove (no matching decoys in manifest).");
   }
@@ -288,6 +352,9 @@ export async function runRemove(
     missing,
     removedDirs,
     excludeStripped,
+    gitignoreStripped,
+    hooksRestored,
+    hooksDeleted,
     notes,
   };
 }
@@ -308,6 +375,12 @@ export function formatRemoveReport(report: RemoveReport): string {
   }
   for (const d of report.removedDirs) {
     lines.push(`  removed empty dir ${d}`);
+  }
+  for (const p of report.hooksRestored) {
+    lines.push(`  restored ${p}`);
+  }
+  for (const p of report.hooksDeleted) {
+    lines.push(`  deleted hooks file ${p}`);
   }
   for (const k of report.keptModified) {
     lines.push(`  warning: kept ${k.path} (${k.reason})`);

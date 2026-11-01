@@ -1,159 +1,75 @@
 # agent-tripwire
 
-Plant non-functional decoy credentials and get alerted when a coding agent reads them.
-
-## Why
-
-Coding agents can read files in repos and home directories, including secrets. Tripwire plants realistic-looking sibling files with unique, non-authenticating tokens, then watches agent session logs. If a token shows up, you get a desktop notification and a local hit record. **It detects; it does not block.**
+Per-project guard for coding agents. Plant non-functional decoy secrets, wire **project-level** Cursor and Claude Code hooks, and get a native OS pop-up plus an IDE message when an agent touches a decoy or a real secret file.
 
 ## 60-second quickstart
 
-Not yet published to npm. Don't install `agent-tripwire` from the registry until this README says so.
+Not yet published to npm. Install from source (do not use the public registry until this README says so):
 
 ```bash
-# install from source (pick one) — do not use npx/npm from the public registry
 git clone https://github.com/percius47/agent-tripwire.git
 cd agent-tripwire && npm ci && npm run build && npm link
 
-# or from a local pack
-npm pack && npm i -g ./agent-tripwire-0.1.0.tgz
-
-# or from GitHub (needs repo access while the repo is private)
-npm i -g github:percius47/agent-tripwire
-
-# in a git repo
+# in any real project (no sandbox required)
 cd your-project
-agent-tripwire init          # project decoys only
-# agent-tripwire init --home # also ~/.aws/credentials.bak and ~/.npmrc.bak
-
-agent-tripwire watch         # foreground; Ctrl+C to stop
-agent-tripwire scan          # one-shot; exit 1 on a hit
-agent-tripwire test-alert    # sample notification + stdout line
-agent-tripwire status        # decoys, adapters, recent hits (no full tokens)
-agent-tripwire remove        # delete hash-matched decoys; strip exclude block
-# agent-tripwire remove --home
-# agent-tripwire remove --dry-run
+agent-tripwire init
 ```
 
-Requires Node.js 20+.
+`init` is idempotent and **project-scoped**. It:
 
-## What gets created
+- Plants decoys (`.env.backup`, `.env.local.old`, `config/secrets.legacy.json`) using the existing token generator + home manifest
+- Adds a marked block to **`.gitignore`** (decoys + `.tripwire/`) and keeps the local `.git/info/exclude` block as a second safety net
+- Writes **project-level** hooks only: `.cursor/hooks.json` and `.claude/settings.json` (merges, marks our entries, backs up first). Never touches global/user config
+- Creates `.tripwire/` (`config.json`, `allow.json`, `incidents.log`, install metadata)
 
-**Project (after `init`):**
+Then ask Cursor or Claude Code to read a decoy, for example:
 
-| Path | Notes |
-|------|--------|
-| `.env.backup` | Sibling of `.env` — never writes `.env` |
-| `.env.local.old` | Sibling only |
-| `config/secrets.legacy.json` | Creates `config/` if needed |
+> Read `.env.backup` and summarize the credentials.
 
-**Home (only with `init --home`):**
+You should see a **native OS notification** and a **Tripwire…** message in the agent/IDE UI. The hook binary is `agent-tripwire-hook` (must be on your `PATH` after `npm link`).
 
-| Path | Notes |
-|------|--------|
-| `~/.aws/credentials.bak` | Never writes `~/.aws/credentials` |
-| `~/.npmrc.bak` | Never writes `~/.npmrc` |
-
-**State (always under `~/.agent-tripwire/`, or `$AGENT_TRIPWIRE_HOME/.agent-tripwire/` in tests):**
-
-| File | Purpose |
-|------|---------|
-| `manifest.json` | Paths, sha256, token ids, times |
-| `offsets.json` | Byte offsets for log tails |
-| `hits.jsonl` | Hit records with redacted snippets |
-| `config.json` | Optional extra adapters |
-
-Real credential files (`.env`, `~/.aws/credentials`, `~/.npmrc`) are never opened for writing. New decoys use `fs.open(..., 'wx')`; if a path already exists, it is skipped and reported.
-
-## Git safety
-
-Ignore lines go into **`.git/info/exclude`** (local only — not committed, does not touch `.gitignore`), inside a marked block:
-
-```
-# >>> agent-tripwire
-...
-# <<< agent-tripwire
+```bash
+agent-tripwire incidents              # latest first
+agent-tripwire incidents --severity high
+agent-tripwire remove                 # restore hooks/gitignore; delete decoys + .tripwire/
 ```
 
-After planting, Tripwire runs `git check-ignore` on each decoy and rolls back if anything is not ignored. `init` refuses paths that are already tracked. `remove` deletes only files whose sha256 still matches the manifest, then strips that exclude block.
+Requires Node.js 20+. Works on Windows, macOS, and Linux.
 
-## Adapters and log paths
+## What the hook does
 
-| Adapter | Default glob | Status |
-|---------|--------------|--------|
-| Claude Code | `~/.claude/projects/*/*.jsonl` | Record shape confirmed on a real Windows machine on Oct 31 2026 (live end-to-end on that machine still pending). Content-based (token in `tool_result`) plus path-based tool_use matching |
-| Codex CLI | `~/.codex/sessions/**/rollout-*.jsonl` | **UNVERIFIED** on a real machine (Codex not installed on the confirmation host). Content-based |
-| Cursor IDE | `~/.cursor/projects/*/agent-transcripts/*/*.jsonl` | Transcript shape confirmed on a real Windows 11 machine (read-only field check). **Path-based only** for reads — Cursor logs `tool_use` paths but not file contents, so hits are `read-attempt` / `write-attempt` / `shell-mention` (plus a raw-line token scan if the agent echoed a decoy token in text) |
-| Config | globs from `config.json` | Supported |
+`agent-tripwire-hook` reads one JSON event on stdin and decides **locally** (no network, no daemon):
 
-Parsers are tolerant: if a line does not match the expected tool-result shape, the raw text is still scanned and tagged `seen` instead of `read`. Cursor has no tool_result payloads, so a Cursor Read of a decoy is a `read-attempt` (attempt to read), not a proven content `read`.
+| Rule | When | Action |
+|------|------|--------|
+| **(a) Decoy** | Path is a decoy, or content/command/MCP input contains a decoy token | **DENY**, high |
+| **(b) Real secret** | Reads of `.env*`, `*.pem`, `*.key`, `id_rsa*`, `.npmrc`, `~/.ssh`, `~/.aws`, etc., or shell that reads them | **ALERT + allow** by default (set `.tripwire/config.json` → `"blockRealSecrets": true` to deny) |
+| **(c) Exfil / MCP** | Secret-looking value or decoy flowing into MCP input, or network command carrying a file/env (`curl` / `wget` / `Invoke-WebRequest` / `nc`) | Cursor → **`ask`**; Claude → **deny** with reason |
 
-## `config.json` format
+Allowlist: `.tripwire/allow.json` (`paths`, `commands`).
 
-Optional file at `~/.agent-tripwire/config.json`:
+Incidents append to `.tripwire/incidents.log` with time, agent, session/conversation id, transcript path, rule, severity, action, target, verdict. Secret values are **never** stored — only path, sha256, and a redacted preview (first 4 characters + length).
 
-```json
-{
-  "adapters": [
-    {
-      "glob": "~/.aider/**/*.log",
-      "name": "aider",
-      "format": "text"
-    },
-    {
-      "glob": "/absolute/path/to/sessions/*.jsonl",
-      "name": "custom",
-      "format": "jsonl"
-    }
-  ]
-}
-```
+Notifications use `node-notifier` (Windows toast, macOS Notification Center, Linux notify-send). Notification failure never breaks the hook. The hook fails **open** on its own crash, except decoy rule (a) when it was already evaluated.
 
-- `glob` (required): absolute path, or relative / `~/…` under home
-- `name` (optional): label in alerts
-- `format` (optional): `"text"` (default) or `"jsonl"`
+## Honest limits
 
-Missing `config.json` means built-in adapters only.
+- Hooks only see what the agent asks to do through the hooked APIs. A **disguised shell command** can slip past; keep `agent-tripwire watch` / `scan` as a transcript backstop.
+- Cursor **cloud** agents: project `.cursor/hooks.json` command hooks are loaded for cloud work, but behavior is not identical to desktop (e.g. `beforeMCPExecution` timing / availability differs; user-level `~/.cursor/hooks.json` is unavailable). Check [Cursor hooks docs](https://cursor.com/docs/agent/hooks).
+- Claude Code cloud sessions do not use your local `~/.claude/settings.json`; project `.claude/settings.json` can apply when that tree is present. Check [Claude Code hooks docs](https://docs.claude.com/en/docs/claude-code/hooks).
 
-## Exit codes
+## Legacy detect-only commands
 
-| Command | `0` | `1` |
-|---------|-----|-----|
-| `init` | planted / skipped OK | rolled back or refused tracked paths |
-| `remove` | always (idempotent) | — |
-| `scan` | no decoy tokens in scanned logs | one or more decoy tokens still present in logs |
-| `scan --new-only` | no brand-new hits | one or more hits not yet in `hits.jsonl` |
-| `watch` | clean stop (SIGINT/SIGTERM) | fatal startup / unrecoverable error |
-| `status` | report printed | fatal error loading state |
-| `test-alert` | sample stdout (+ notify attempted) | notify threw synchronously |
-
-`scan` exits `1` while the logs still contain a decoy, even if that hit is already in `hits.jsonl`. Deduping only skips a second `hits.jsonl` append and a second notification. Use `--new-only` for the legacy “new hits only” exit behavior.
-
-## Privacy
-
-No network calls: no telemetry, no update check. State stays on disk under `~/.agent-tripwire/`. Hit snippets are capped and redacted; status and alerts show a short token label (`tw…` + last four), not the full value. Tests stub `net` / `http` / `https` / `fetch` to throw.
-
-## Limitations (UNVERIFIED)
-
-- **Claude Code** JSONL record shape was confirmed on a real Windows machine on Oct 31 2026 (read-only check). Live end-to-end tripwire detection on that machine is still pending. **Codex** remains **UNVERIFIED** (not installed on that host). Path or record-shape drift may reduce attribution quality (hits can still fire via raw-line fallback as `seen`).
-- **Cursor IDE** agent transcripts (JSONL under `~/.cursor/projects/…/agent-transcripts/`) are supported via path-based matching. Cursor does not log file contents, so a hit means a read/write/shell *attempt* against a decoy path, not proof the token was loaded into context. Relative tool paths in Cursor logs are **UNVERIFIED**; if present they match by basename / project-relative suffix only. Older Cursor chat SQLite storage is not used.
-- The aws/npm “ignore `.bak`” integration tests skip when those binaries are absent.
-- Desktop notifications depend on `node-notifier` and the host OS; `test-alert --no-notify` exercises stdout only.
-- Foreground `watch` only — no systemd/launchd/Scheduled Task installer in v0.1.0.
+Still available (unchanged engines): `watch`, `scan`, `status`, `test-alert`. These tail agent session logs under `~/.agent-tripwire/` state and do not require hooks.
 
 ## Uninstall
 
 ```bash
-# from each project where you ran init
 agent-tripwire remove
-# if you used init --home
-agent-tripwire remove --home
-
-# leftover state (only if nothing else remains / you want a full wipe)
-rm -rf ~/.agent-tripwire
+# agent-tripwire remove --home   # if you used init --home
 ```
 
-`remove` leaves any decoy whose contents changed since planting (hash mismatch) and reports it. Use `--dry-run` to preview.
+`remove` restores hook files byte-exact when nothing else changed, deletes files Tripwire created when they were empty/absent before, strips the marked `.gitignore` / exclude blocks, and removes `.tripwire/`.
 
 ## License
 
