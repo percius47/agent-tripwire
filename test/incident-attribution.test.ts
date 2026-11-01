@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { runInit } from "../src/init.js";
 import { runHookPayload } from "../src/hook/run.js";
@@ -12,7 +12,8 @@ describe("incident attribution across guarded projects", () => {
     const restore = useHome(home);
     try {
       // Two guarded projects share decoy names (.env.local.old etc.).
-      const other = await makeTempProject(home);
+      const other = path.join(home, "projects", "other");
+      await mkdir(other, { recursive: true });
       await initGitRepo(other);
       await runInit({ projectRoot: other });
       const mine = await makeTempProject(home);
