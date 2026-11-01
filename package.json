@@ -1,6 +1,6 @@
 {
   "name": "agent-tripwire",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Per-project guard: plant decoy secrets and block/alert when Cursor or Claude Code read them",
   "type": "module",
   "license": "MIT",
