@@ -25,6 +25,11 @@ import { readNewLines } from "./tail.js";
 export interface EngineHit extends HitRecord {
   /** Stdout-safe alert line (never includes the full token). */
   alertLine: string;
+  /**
+   * False when the match was already in `seen` / hits.jsonl (no append).
+   * Omitted or true means this hit was newly recorded.
+   */
+  isNew?: boolean;
 }
 
 export interface ProcessFileOptions {
@@ -41,6 +46,12 @@ export interface ProcessFileOptions {
    * end in a newline). Used by scan; watch waits for a complete line.
    */
   includeTrailingPartial?: boolean;
+  /**
+   * When true, matches already in `seen` are still returned with `isNew: false`
+   * and are not appended to hits.jsonl. Used by scan so exit code 1 reflects
+   * “logs still contain a decoy”, while dedupe only covers append + notify.
+   */
+  includeKnown?: boolean;
 }
 
 function formatAlert(hit: HitRecord): string {
@@ -88,7 +99,25 @@ export async function processFile(
         bag = new Set();
         seen.set(key, bag);
       }
-      if (bag.has(m.tokenId)) continue;
+      if (bag.has(m.tokenId)) {
+        if (opts.includeKnown) {
+          const kind: HitKind = parsed.isToolResult ? "read" : "seen";
+          const label = formatTokenLabel(m.tokenId);
+          const hit: HitRecord = {
+            at: new Date().toISOString(),
+            tokenId: m.tokenId,
+            kind,
+            adapter: adapter.id,
+            tool: parsed.tool,
+            sessionId: session,
+            sourceFile: abs,
+            decoyPath: m.decoyPath,
+            snippet: buildHitSnippet(parsed.text, m.value, label),
+          };
+          hits.push({ ...hit, alertLine: formatAlert(hit), isNew: false });
+        }
+        continue;
+      }
       bag.add(m.tokenId);
 
       const kind: HitKind = parsed.isToolResult ? "read" : "seen";
@@ -105,7 +134,7 @@ export async function processFile(
         snippet: buildHitSnippet(parsed.text, m.value, label),
       };
       await appendHit(hit);
-      hits.push({ ...hit, alertLine: formatAlert(hit) });
+      hits.push({ ...hit, alertLine: formatAlert(hit), isNew: true });
     }
   }
 
@@ -139,6 +168,11 @@ export interface ScanOptions {
    * duplicates or re-notify (default true).
    */
   seedFromHits?: boolean;
+  /**
+   * When true, still report matches already in hits.jsonl (`isNew: false`)
+   * so scan can exit 1 while logs remain dirty (default false).
+   */
+  includeKnown?: boolean;
 }
 
 /**
@@ -161,6 +195,7 @@ export async function runScanPass(
     ? seedSeenFromHits(await loadHits())
     : new Map<string, Set<string>>();
   const allHits: EngineHit[] = [];
+  const includeKnown = options.includeKnown === true;
 
   for (const adapter of options.adapters) {
     const files = await resolveAdapterFiles(adapter);
@@ -176,6 +211,7 @@ export async function runScanPass(
         seen,
         persistOffsets: !fromStart,
         includeTrailingPartial: fromStart,
+        includeKnown,
       });
       allHits.push(...hits);
     }
