@@ -58,8 +58,8 @@ export function hookPathWarning(status: HookPathStatus): string | null {
   if (status.ok) return null;
   const why =
     status.reason === "npx-temporary"
-      ? "it is only on PATH temporarily because you ran this through npx"
-      : "it was not found on your PATH";
+      ? "is only on PATH temporarily because you ran this through npx"
+      : "was not found on your PATH";
   return [
     `WARNING: Tripwire is NOT protecting this project yet: \`${HOOK_BIN}\` ${why}.`,
     "Cursor and Claude Code will not find the hook, so nothing gets blocked.",
