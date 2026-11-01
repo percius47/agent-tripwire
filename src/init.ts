@@ -1,3 +1,4 @@
+import { hookPathStatus, hookPathWarning } from "./hook-path.js";
 import { unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -34,6 +35,8 @@ export { resolveProjectRoot } from "./git-exclude.js";
 export interface InitOptions {
   projectRoot?: string;
   home?: boolean;
+  /** Env used for the hook PATH check (tests pass a fake one). */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface InitReport {
@@ -55,6 +58,8 @@ export interface InitReport {
   refusedTracked: string[];
   /** Human-readable notes (e.g. not a git repo). */
   notes: string[];
+  /** Set when `agent-tripwire-hook` won't be found by the IDE after init. */
+  hookPathWarning: string | null;
 }
 
 async function deleteQuietly(filePath: string): Promise<void> {
@@ -325,6 +330,7 @@ export async function runInit(options: InitOptions = {}): Promise<InitReport> {
   notes.push(
     "Project hooks point at `agent-tripwire-hook` (must be on PATH). Global/user configs were not modified.",
   );
+  const hookPathWarn = hookPathWarning(hookPathStatus(options.env ?? process.env));
 
   return {
     projectRoot,
@@ -338,6 +344,7 @@ export async function runInit(options: InitOptions = {}): Promise<InitReport> {
     rolledBack,
     refusedTracked,
     notes,
+    hookPathWarning: hookPathWarn,
   };
 }
 

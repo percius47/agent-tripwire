@@ -4,16 +4,16 @@ Per-project guard for coding agents. Plant non-functional decoy secrets, wire **
 
 ## 60-second quickstart
 
-Not yet published to npm. Install from source (do not use the public registry until this README says so):
+Install it globally once, then run `init` in each project you want guarded:
 
 ```bash
-git clone https://github.com/percius47/agent-tripwire.git
-cd agent-tripwire && npm ci && npm run build && npm link
+npm i -g agent-tripwire
 
-# in any real project (no sandbox required)
 cd your-project
 agent-tripwire init
 ```
+
+Use the global install, not `npx agent-tripwire init`. The IDE hooks call `agent-tripwire-hook` from your PATH every time an agent reads a file, and `npx` only puts it there while `npx` itself is running. If `init` can't find a lasting `agent-tripwire-hook`, it prints a **WARNING** that the project is not protected yet.
 
 `init` is idempotent and **project-scoped**. It:
 
@@ -26,7 +26,7 @@ Then ask Cursor or Claude Code to read a decoy, for example:
 
 > Read `.env.backup` and summarize the credentials.
 
-You should see a **native OS notification** and a **Tripwire…** message in the agent/IDE UI. The hook binary is `agent-tripwire-hook` (must be on your `PATH` after `npm link`).
+You should see a **native OS notification** and a **Tripwire…** message in the agent/IDE UI. The hook binary is `agent-tripwire-hook` (on your `PATH` after `npm i -g agent-tripwire`).
 
 ```bash
 agent-tripwire incidents              # latest first
