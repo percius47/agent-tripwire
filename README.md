@@ -52,6 +52,15 @@ Incidents append to `.tripwire/incidents.log` with time, agent, session/conversa
 
 Notifications use `node-notifier` (Windows toast, macOS Notification Center, Linux notify-send). Notification failure never breaks the hook. The hook fails **open** on its own crash, except decoy rule (a) when it was already evaluated. If `.tripwire/allow.json` or `config.json` is unreadable, defaults are used (no allowlist), not allow-all. If the decoy manifest is unreadable, the hook still denies the decoy paths recorded in `.tripwire/install.json` and logs a warning.
 
+## Snooze
+
+```bash
+agent-tripwire pause --for 30m   # default 30m, max 24h
+agent-tripwire resume            # turn blocking back on now
+```
+
+While paused, nothing in this project is blocked and no pop-ups fire, but every hit is still written to `.tripwire/incidents.log` marked `paused`. The pause ends on its own. If an agent runs `agent-tripwire pause` / `remove` or writes Tripwire's state or hook files from the shell, the hook flags it as **tamper** (Cursor asks you, Claude Code denies), and that rule is never snoozed. Writes through an agent's own edit tools aren't hooked yet.
+
 ## Honest limits
 
 - **This is a tripwire, not a sandbox.** It flags and blocks the specific actions it can see; it does not isolate the agent.

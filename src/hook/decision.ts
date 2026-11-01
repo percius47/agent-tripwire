@@ -9,6 +9,7 @@ import {
 } from "../path-match.js";
 import type { ProjectAllowlist, ProjectConfig } from "../project-state.js";
 import { redactSecretValue, scrubText } from "./redact.js";
+import { isTamperCommand } from "../pause.js";
 import {
   commandReadsSecretPath,
   isNetworkExfilCommand,
@@ -20,7 +21,13 @@ export type HookAgent = "cursor" | "claude-code";
 
 export type HookPermission = "allow" | "deny" | "ask";
 
-export type HookRule = "decoy" | "real-secret" | "exfil" | "allowlist" | "none";
+export type HookRule =
+  | "decoy"
+  | "real-secret"
+  | "exfil"
+  | "tamper"
+  | "allowlist"
+  | "none";
 
 export interface HookDecision {
   permission: HookPermission;
@@ -133,6 +140,23 @@ export function evaluateHook(input: HookEvalInput): HookDecision {
     input.command ??
     input.toolName ??
     input.event;
+
+  // --- Rule (t): agent trying to switch Tripwire off ---
+  if (input.command && isTamperCommand(input.command)) {
+    const m = msg(
+      label,
+      "tried to pause, remove or edit Tripwire itself",
+      scrubText(input.command).slice(0, 120),
+    );
+    return {
+      permission: "ask",
+      rule: "tamper",
+      severity: "high",
+      ...m,
+      target: scrubText(input.command).slice(0, 200),
+      decoyDeny: false,
+    };
+  }
 
   // --- Rule (a): decoy hit ---
   if (input.filePath) {

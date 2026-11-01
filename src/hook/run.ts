@@ -16,6 +16,7 @@ import {
   type ProjectConfig,
 } from "../project-state.js";
 import { scrubKnownValues, scrubText } from "./redact.js";
+import { activePause } from "../pause.js";
 import {
   evaluateHook,
   type HookAgent,
@@ -427,11 +428,30 @@ export async function runHookPayload(
     }
 
     decision = sanitizeDecision(decision, decoys);
+    const incidentRoot = decision.decoyProjectRoot ?? projectRoot;
+
+    // Snooze: `agent-tripwire pause --for 30m` turns blocks into log-only
+    // until it expires. Tamper attempts are never snoozed.
+    let pausedUntil: string | null = null;
+    if (
+      decision.rule !== "none" &&
+      decision.rule !== "allowlist" &&
+      decision.rule !== "tamper"
+    ) {
+      const pause = await activePause(incidentRoot).catch(() => null);
+      if (pause) {
+        pausedUntil = pause.until;
+        decision = {
+          ...decision,
+          permission: "allow",
+          decoyDeny: false,
+        };
+      }
+    }
 
     if (decision.decoyDeny) {
       decoyDenyFallback = decision;
     }
-    const incidentRoot = decision.decoyProjectRoot ?? projectRoot;
 
     const response =
       agent === "claude-code"
@@ -451,12 +471,14 @@ export async function runHookPayload(
         rule: decision.rule,
         severity: decision.severity,
         action:
-          decision.permission === "allow" && decision.rule === "real-secret"
+          pausedUntil !== null ||
+          (decision.permission === "allow" && decision.rule === "real-secret")
             ? "alert"
             : decision.permission,
         target: decision.target,
         verdict:
           (decision.userMessage || decision.permission) +
+          (pausedUntil !== null ? ` [paused until ${pausedUntil}; not blocked]` : "") +
           (state.errors.length > 0
             ? ` [warning: unreadable Tripwire state: ${state.errors.join(", ")}]`
             : ""),
@@ -477,6 +499,7 @@ export async function runHookPayload(
     if (
       options.notify !== false &&
       config.notify !== false &&
+      pausedUntil === null &&
       shouldNotify(decision) &&
       decision.userMessage
     ) {
