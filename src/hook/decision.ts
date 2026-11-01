@@ -211,7 +211,10 @@ export function evaluateHook(input: HookEvalInput): HookDecision {
   }
 
   if (input.command) {
-    for (const d of decoys) {
+    // Decoy names repeat across projects (every project gets `.env.backup`),
+    // so a relative path in a command must resolve to *this* project's decoy
+    // first; otherwise the incident is logged in another project.
+    for (const d of preferProjectDecoys(decoys, input.projectRoot)) {
       if (commandMentionsDecoy(input.command, d)) {
         const rel = relForDisplay(input.projectRoot, d);
         const m = msg(label, "ran a command targeting a decoy secret", rel);
@@ -374,4 +377,25 @@ export function evaluateHook(input: HookEvalInput): HookDecision {
     target: scrubText(target),
     decoyDeny: false,
   };
+}
+
+function sameRoot(a: string, b: string): boolean {
+  const norm = (p: string) => {
+    const r = path.resolve(p).replace(/[\\/]+$/, "");
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  };
+  return norm(a) === norm(b);
+}
+
+/** Decoys planted in `projectRoot` first, then everything else (stable). */
+export function preferProjectDecoys<T extends { projectRoot?: string }>(
+  decoys: readonly T[],
+  projectRoot: string,
+): T[] {
+  const mine: T[] = [];
+  const rest: T[] = [];
+  for (const d of decoys) {
+    (d.projectRoot && sameRoot(d.projectRoot, projectRoot) ? mine : rest).push(d);
+  }
+  return [...mine, ...rest];
 }
