@@ -38,6 +38,9 @@ program
   .action(async (opts: { home?: boolean }) => {
     const report = await runInit({ home: opts.home === true });
     console.log(formatInitReport(report));
+    if (report.hookPathWarning) {
+      console.error(`\n${report.hookPathWarning}`);
+    }
     if (report.rolledBack.length > 0 || report.refusedTracked.length > 0) {
       process.exitCode = EXIT.FAIL;
     } else {
