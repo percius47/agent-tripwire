@@ -104,6 +104,7 @@ export {
 export { readNewLines } from "./tail.js";
 export {
   processFile,
+  pathHitPredatesDecoy,
   runScanPass,
   resolveAdapterFiles,
   type EngineHit,

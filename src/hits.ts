@@ -45,9 +45,8 @@ export function hitDedupeKey(
 }
 
 /**
- * Strength for upgrade/dedupe: token proof (`read`/`seen`) beats path attempts,
- * which beat `shell-mention`. A stronger hit for the same tokenId must still
- * alert (watch delivers tool_use and tool_result in separate batches).
+ * Relative strength (token proof > path attempts > shell-mention). Kept for
+ * callers/tests; live dedupe is per distinct kind, not strongest-only.
  */
 export function hitStrength(kind: HitKind): number {
   switch (kind) {
@@ -64,8 +63,8 @@ export function hitStrength(kind: HitKind): number {
   }
 }
 
-/** adapter+file+session → tokenId → strongest kind recorded so far. */
-export type SeenBag = Map<string, Map<string, HitKind>>;
+/** adapter+file+session → tokenId → kinds already recorded for that decoy. */
+export type SeenBag = Map<string, Map<string, Set<HitKind>>>;
 
 /** Load all hit records from hits.jsonl (missing file → []). */
 export async function loadHits(): Promise<HitRecord[]> {
@@ -101,9 +100,9 @@ export async function loadHits(): Promise<HitRecord[]> {
 }
 
 /**
- * Seed in-memory dedupe from persisted hits (strongest kind per tokenId per
- * adapter/file/session). Path-only rows must not permanently block a later
- * token `read` upgrade after a watch restart.
+ * Seed in-memory dedupe from persisted hits (each kind per tokenId per
+ * adapter/file/session). A prior path-only row must not block a later token
+ * `read`/`seen` or a distinct path kind such as `shell-mention`.
  */
 export function seedSeenFromHits(hits: HitRecord[]): SeenBag {
   const seen: SeenBag = new Map();
@@ -114,10 +113,12 @@ export function seedSeenFromHits(hits: HitRecord[]): SeenBag {
       bag = new Map();
       seen.set(key, bag);
     }
-    const prev = bag.get(h.tokenId);
-    if (!prev || hitStrength(h.kind) > hitStrength(prev)) {
-      bag.set(h.tokenId, h.kind);
+    let kinds = bag.get(h.tokenId);
+    if (!kinds) {
+      kinds = new Set();
+      bag.set(h.tokenId, kinds);
     }
+    kinds.add(h.kind);
   }
   return seen;
 }

@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import type { LogAdapter, PathSignal } from "./adapters/types.js";
 import { expandGlob } from "./glob-util.js";
@@ -5,7 +6,6 @@ import {
   appendHit,
   buildHitSnippet,
   hitDedupeKey,
-  hitStrength,
   loadHits,
   seedSeenFromHits,
   type HitKind,
@@ -49,8 +49,9 @@ export interface ProcessFileOptions {
   decoys?: DecoyRecord[];
   offsets: OffsetsState;
   /**
-   * adapter+sourceFile+sessionId → tokenId → strongest kind already alerted.
-   * Token proof (`read`/`seen`) may upgrade an earlier path-only attempt.
+   * adapter+sourceFile+sessionId → tokenId → kinds already alerted.
+   * Each distinct kind is reported once; a later token hit may still fire
+   * after a path-only kind and keeps the path signal on the alert.
    */
   seen: SeenBag;
   /** When true, persist offsets after this file. */
@@ -128,14 +129,40 @@ function isPathOnlyKind(kind: HitKind): boolean {
 }
 
 /**
+ * Path-based hits must not fire for transcript activity that predates the
+ * decoy. Prefer the record timestamp; when missing/unparseable, use the
+ * transcript file mtime. Token matches are never filtered by this.
+ */
+export function pathHitPredatesDecoy(
+  decoy: DecoyRecord,
+  recordTimestamp: string | undefined,
+  fileMtimeMs: number,
+): boolean {
+  const createdMs = Date.parse(decoy.createdAt);
+  if (Number.isNaN(createdMs)) return false;
+
+  const trimmed = recordTimestamp?.trim() ?? "";
+  let eventMs = Number.NaN;
+  if (trimmed.length > 0) {
+    eventMs = Date.parse(trimmed);
+  }
+  if (Number.isNaN(eventMs)) {
+    eventMs = fileMtimeMs;
+  }
+  if (Number.isNaN(eventMs)) return false;
+  return eventMs < createdMs;
+}
+
+/**
  * Process new bytes for one log file. Updates offsets in-place.
  * Returns newly recorded hits (after adapter+sourceFile+session dedupe).
  *
  * Token matches and path signals are merged per decoy on the same line
  * (prefer token kind; record both signals). Path signals that share a
  * tool_use id with a later token match in the same processFile batch are
- * merged into one token hit. Across batches (live watch), a token hit
- * upgrades a weaker path-only hit for the same tokenId.
+ * merged into one token hit. Across batches (live watch), each distinct
+ * kind per decoy is reported once; a later token hit still records and
+ * keeps a prior path signal on the alert.
  */
 export async function processFile(
   opts: ProcessFileOptions,
@@ -153,6 +180,14 @@ export async function processFile(
   const prev: FileOffset = offsets[abs] ?? { offset: 0, partial: "" };
   const { lines, next } = await readNewLines(abs, prev);
   offsets[abs] = next;
+
+  let fileMtimeMs = Number.NaN;
+  try {
+    fileMtimeMs = (await stat(abs)).mtimeMs;
+  } catch {
+    // readNewLines already succeeded; leave NaN so timestamp-less records
+    // without a usable mtime are not stale-filtered.
+  }
 
   const toProcess = [...lines];
   if (opts.includeTrailingPartial && next.partial.length > 0) {
@@ -179,13 +214,16 @@ export async function processFile(
       bag = new Map();
       seen.set(key, bag);
     }
-    const prevKind = bag.get(args.tokenId);
+    let prevKinds = bag.get(args.tokenId);
+    if (!prevKinds) {
+      prevKinds = new Set();
+      bag.set(args.tokenId, prevKinds);
+    }
     const signals = [...args.signals];
-    // Upgrading a path-only row: keep both signals on the stronger alert.
+    // Token alert after a path-only row: keep both signals on the new alert.
     if (
-      prevKind &&
-      isPathOnlyKind(prevKind) &&
-      hitStrength(args.kind) > hitStrength(prevKind) &&
+      [...prevKinds].some(isPathOnlyKind) &&
+      !isPathOnlyKind(args.kind) &&
       !signals.includes("path")
     ) {
       signals.push("path");
@@ -205,17 +243,15 @@ export async function processFile(
     };
     if (args.toolUseId) base.toolUseId = args.toolUseId;
 
-    if (prevKind !== undefined) {
-      if (hitStrength(args.kind) <= hitStrength(prevKind)) {
-        if (opts.includeKnown) {
-          hits.push({ ...base, alertLine: formatAlert(base), isNew: false });
-        }
-        return;
+    // Each distinct kind per decoy/file/session alerts once.
+    if (prevKinds.has(args.kind)) {
+      if (opts.includeKnown) {
+        hits.push({ ...base, alertLine: formatAlert(base), isNew: false });
       }
-      // Stronger kind: upgrade — append + alert again.
+      return;
     }
 
-    bag.set(args.tokenId, args.kind);
+    prevKinds.add(args.kind);
     await appendHit(base);
     hits.push({ ...base, alertLine: formatAlert(base), isNew: true });
   };
@@ -233,7 +269,11 @@ export async function processFile(
     const pathResolved: ResolvedPathHit[] = [];
     for (const sig of parsed.pathSignals ?? []) {
       const r = resolvePathSignal(sig, decoys, projectCtx);
-      if (r) pathResolved.push(r);
+      if (!r) continue;
+      if (pathHitPredatesDecoy(r.decoy, parsed.timestamp, fileMtimeMs)) {
+        continue;
+      }
+      pathResolved.push(r);
     }
 
     // tokenId → path hit on this line (for same-line merge)
@@ -262,13 +302,17 @@ export async function processFile(
         }
       }
 
-      // Also treat a weaker kind already in the seen bag as a path signal
-      // (cross-batch upgrade after watch delivered tool_use separately).
+      // Also treat a prior path-only kind in the seen bag as a path signal
+      // (cross-batch after watch delivered tool_use separately).
       const key = hitDedupeKey(adapter.id, abs, session);
-      const priorKind = seen.get(key)?.get(m.tokenId);
+      const priorKinds = seen.get(key)?.get(m.tokenId);
 
       const signals: HitSignal[] = ["token"];
-      if (pathHit || pending || (priorKind && isPathOnlyKind(priorKind))) {
+      if (
+        pathHit ||
+        pending ||
+        (priorKinds && [...priorKinds].some(isPathOnlyKind))
+      ) {
         signals.push("path");
       }
 

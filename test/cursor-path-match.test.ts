@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   createClaudeCodeAdapter,
@@ -13,11 +13,12 @@ import {
 import { loadAdapters } from "../src/adapters/index.js";
 import {
   createSeenMap,
+  pathHitPredatesDecoy,
   processFile,
   runScanPass,
 } from "../src/engine.js";
 import { runInit } from "../src/init.js";
-import { loadManifest, type DecoyRecord } from "../src/manifest.js";
+import { loadManifest, saveManifest, type DecoyRecord } from "../src/manifest.js";
 import { buildTokenMatcher } from "../src/match.js";
 import { loadOffsets } from "../src/offsets.js";
 import {
@@ -458,7 +459,9 @@ describe("Claude path matching + dedupe", () => {
           JSON.stringify({
             type: "assistant",
             sessionId: "sess-dedupe",
-            timestamp: "2026-10-31T12:00:00.000Z",
+            // After decoy createdAt (omit fixed past dates — path filter uses them).
+            timestamp: new Date().toISOString(),
+            cwd: project,
             message: {
               role: "assistant",
               content: [
@@ -474,7 +477,8 @@ describe("Claude path matching + dedupe", () => {
           JSON.stringify({
             type: "user",
             sessionId: "sess-dedupe",
-            timestamp: "2026-10-31T12:00:01.000Z",
+            timestamp: new Date().toISOString(),
+            cwd: project,
             message: {
               role: "user",
               content: [
@@ -993,6 +997,324 @@ describe("remove cosmetic", () => {
       expect(text).not.toMatch(/Deleted .*manifest\.json/i);
       expect(text).not.toMatch(/Deleted watcher offsets/i);
       expect(second.notes.some((n) => /nothing to remove/i.test(n))).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("path hits vs decoy createdAt", () => {
+  it("pathHitPredatesDecoy uses record time, else file mtime", () => {
+    const decoy: DecoyRecord = {
+      path: "/tmp/.env.backup",
+      sha256: "x",
+      tokenId: "tw_created_at_token_xxxx",
+      createdAt: "2026-10-31T12:00:00.000Z",
+      scope: "project",
+      projectRoot: "/tmp",
+    };
+    const createdMs = Date.parse(decoy.createdAt);
+    expect(
+      pathHitPredatesDecoy(decoy, "2026-10-31T11:59:59.000Z", createdMs + 60_000),
+    ).toBe(true);
+    expect(
+      pathHitPredatesDecoy(decoy, "2026-10-31T12:00:01.000Z", createdMs - 60_000),
+    ).toBe(false);
+    // No record timestamp → file mtime.
+    expect(pathHitPredatesDecoy(decoy, "", createdMs - 1)).toBe(true);
+    expect(pathHitPredatesDecoy(decoy, "", createdMs + 1)).toBe(false);
+  });
+
+  it("skips Claude path hits older than decoy createdAt; token still counts", async () => {
+    const home = await makeTempHome();
+    const restore = useHome(home);
+    try {
+      const project = await makeTempProject(home);
+      await initGitRepo(project);
+      const report = await runInit({ projectRoot: project });
+      const decoy = report.project.created.find((d) =>
+        d.path.endsWith(".env.backup"),
+      );
+      if (!decoy) throw new Error("missing decoy");
+
+      // Make the decoy look newly planted after the old transcript activity.
+      const manifest = await loadManifest();
+      const createdAt = "2026-10-31T18:00:00.000Z";
+      await saveManifest({
+        ...manifest,
+        decoys: manifest.decoys.map((d) =>
+          d.tokenId === decoy.tokenId ? { ...d, createdAt } : d,
+        ),
+      });
+      const decoys = (await loadManifest()).decoys;
+      const adapter = createClaudeCodeAdapter(home);
+      const matcher = buildTokenMatcher(decoys);
+      const dir = path.join(home, ".claude", "projects", "-stale-path");
+      await mkdir(dir, { recursive: true });
+
+      const oldPathFile = path.join(dir, "sess-old-path.jsonl");
+      await writeFile(
+        oldPathFile,
+        `${JSON.stringify({
+          type: "assistant",
+          sessionId: "sess-old-path",
+          timestamp: "2026-10-31T12:00:00.000Z",
+          cwd: project,
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "toolu_old_read",
+                name: "Read",
+                input: { file_path: decoy.path },
+              },
+            ],
+          },
+        })}\n`,
+        "utf8",
+      );
+      const stalePathHits = await processFile({
+        filePath: oldPathFile,
+        adapter,
+        matcher,
+        decoys,
+        offsets: await loadOffsets(),
+        seen: createSeenMap(),
+      });
+      expect(stalePathHits).toHaveLength(0);
+
+      const newPathFile = path.join(dir, "sess-new-path.jsonl");
+      await writeFile(
+        newPathFile,
+        `${JSON.stringify({
+          type: "assistant",
+          sessionId: "sess-new-path",
+          timestamp: "2026-10-31T19:00:00.000Z",
+          cwd: project,
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "toolu_new_read",
+                name: "Read",
+                input: { file_path: decoy.path },
+              },
+            ],
+          },
+        })}\n`,
+        "utf8",
+      );
+      const freshPathHits = await processFile({
+        filePath: newPathFile,
+        adapter,
+        matcher,
+        decoys,
+        offsets: await loadOffsets(),
+        seen: createSeenMap(),
+      });
+      expect(freshPathHits).toHaveLength(1);
+      expect(freshPathHits[0]?.kind).toBe("read-attempt");
+      expect(freshPathHits[0]?.toolUseId).toBe("toolu_new_read");
+
+      // Token proof from a pre-createdAt record still counts.
+      const oldTokenFile = path.join(dir, "sess-old-token.jsonl");
+      await writeFile(
+        oldTokenFile,
+        `${JSON.stringify({
+          type: "user",
+          sessionId: "sess-old-token",
+          timestamp: "2026-10-31T12:00:01.000Z",
+          cwd: project,
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_old_token",
+                content: `AWS_ACCESS_KEY_ID=${decoy.tokenId}\n`,
+              },
+            ],
+          },
+          toolUseResult: {
+            content: `AWS_ACCESS_KEY_ID=${decoy.tokenId}\n`,
+          },
+        })}\n`,
+        "utf8",
+      );
+      const tokenHits = await processFile({
+        filePath: oldTokenFile,
+        adapter,
+        matcher,
+        decoys,
+        offsets: await loadOffsets(),
+        seen: createSeenMap(),
+      });
+      expect(tokenHits).toHaveLength(1);
+      expect(tokenHits[0]?.kind).toBe("read");
+      expect(tokenHits[0]?.signals).toContain("token");
+    } finally {
+      restore();
+    }
+  });
+
+  it("Cursor path hits fall back to transcript mtime vs createdAt", async () => {
+    const home = await makeTempHome();
+    const restore = useHome(home);
+    try {
+      const project = await makeTempProject(home);
+      await initGitRepo(project);
+      const report = await runInit({ projectRoot: project });
+      const decoy = report.project.created.find((d) =>
+        d.path.endsWith(".env.backup"),
+      );
+      if (!decoy) throw new Error("missing decoy");
+
+      const createdAt = "2026-10-31T18:00:00.000Z";
+      const createdSec = Date.parse(createdAt) / 1000;
+      const manifest = await loadManifest();
+      await saveManifest({
+        ...manifest,
+        decoys: manifest.decoys.map((d) =>
+          d.tokenId === decoy.tokenId ? { ...d, createdAt } : d,
+        ),
+      });
+      const decoys = (await loadManifest()).decoys;
+      const adapter = createCursorAdapter(home);
+      const matcher = buildTokenMatcher(decoys);
+      const slug = toCursorProjectSlug(project);
+      const sessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const file = cursorSessionFile(home, slug, sessionId);
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(
+        file,
+        `${cursorAssistantToolUse("Read", { path: decoy.path }, "tool_old")}\n`,
+        "utf8",
+      );
+      // Transcript last modified before the decoy existed.
+      await utimes(file, createdSec - 3600, createdSec - 3600);
+
+      const staleHits = await processFile({
+        filePath: file,
+        adapter,
+        matcher,
+        decoys,
+        offsets: await loadOffsets(),
+        seen: createSeenMap(),
+      });
+      expect(staleHits.filter((h) => h.kind === "read-attempt")).toHaveLength(0);
+
+      // Touch the file after createdAt and append a fresh Read → should hit.
+      await utimes(file, createdSec + 60, createdSec + 60);
+      await appendFile(
+        file,
+        `${cursorAssistantToolUse("Read", { path: decoy.path }, "tool_new")}\n`,
+        "utf8",
+      );
+      // appendFile updates mtime; ensure it remains after createdAt.
+      await utimes(file, createdSec + 120, createdSec + 120);
+
+      const freshHits = await processFile({
+        filePath: file,
+        adapter,
+        matcher,
+        decoys,
+        offsets: await loadOffsets(),
+        seen: createSeenMap(),
+      });
+      // From-offset read only sees the new line; mtime is after createdAt.
+      expect(freshHits.some((h) => h.kind === "read-attempt")).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("watch: distinct path kinds per decoy", () => {
+  it("emits shell-mention after read-attempt for the same decoy/session", async () => {
+    const home = await makeTempHome();
+    const restore = useHome(home);
+    try {
+      const project = await makeTempProject(home);
+      await initGitRepo(project);
+      const report = await runInit({ projectRoot: project });
+      const decoy = report.project.created.find((d) =>
+        d.path.endsWith(".env.backup"),
+      );
+      if (!decoy) throw new Error("missing decoy");
+      const decoys = (await loadManifest()).decoys;
+      const adapter = createCursorAdapter(home);
+      const matcher = buildTokenMatcher(decoys);
+      const slug = toCursorProjectSlug(project);
+      const sessionId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+      const file = cursorSessionFile(home, slug, sessionId);
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, "", "utf8");
+
+      const offsets = await loadOffsets();
+      const seen = createSeenMap();
+      const kinds: string[] = [];
+
+      await appendFile(
+        file,
+        `${cursorAssistantToolUse(
+          "Read",
+          { path: decoy.path },
+          "tool_read",
+        )}\n`,
+        "utf8",
+      );
+      const first = await processFile({
+        filePath: file,
+        adapter,
+        matcher,
+        decoys,
+        offsets,
+        seen,
+      });
+      kinds.push(...first.map((h) => h.kind));
+      expect(first.some((h) => h.kind === "read-attempt")).toBe(true);
+
+      await appendFile(
+        file,
+        `${cursorAssistantToolUse(
+          "Shell",
+          { command: "type .env.backup" },
+          "tool_shell",
+        )}\n`,
+        "utf8",
+      );
+      const second = await processFile({
+        filePath: file,
+        adapter,
+        matcher,
+        decoys,
+        offsets,
+        seen,
+      });
+      kinds.push(...second.map((h) => h.kind));
+      expect(second.some((h) => h.kind === "shell-mention")).toBe(true);
+
+      // Same kind again must not re-alert.
+      await appendFile(
+        file,
+        `${cursorAssistantToolUse(
+          "Shell",
+          { command: "type .env.backup" },
+          "tool_shell_2",
+        )}\n`,
+        "utf8",
+      );
+      const third = await processFile({
+        filePath: file,
+        adapter,
+        matcher,
+        decoys,
+        offsets,
+        seen,
+      });
+      expect(third.filter((h) => h.kind === "shell-mention")).toHaveLength(0);
+
+      expect(kinds).toContain("read-attempt");
+      expect(kinds).toContain("shell-mention");
     } finally {
       restore();
     }
