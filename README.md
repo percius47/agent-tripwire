@@ -97,7 +97,7 @@ Everything runs **locally**. No network, no daemon, no account.
 | 🪤 **Decoy secrets** | Realistic fake credentials. Any touch is blocked, by path, by token in content, or in a shell or MCP call |
 | 🔑 **Real-secret alerts** | Reads of `.env*`, `*.pem`, `*.key`, `id_rsa*`, `~/.ssh`, `~/.aws` and more raise an alert. You can opt in to blocking them |
 | 📤 **Exfil checks** | Secrets flowing into MCP input, or `curl` / `wget` / `Invoke-WebRequest` / `nc` carrying files, get asked about (Cursor) or denied (Claude Code) |
-| 🛡️ **Tamper-proof snooze** | `pause` needs a human-typed code and refuses to run in an agent's shell |
+| 🛡️ **Tamper-resistant snooze** | `pause` needs a human-typed code and refuses to run in an agent's shell |
 | 🔔 **Native alerts** | Windows toast, macOS Notification Center, Linux notify-send, plus a message inside the IDE |
 | 🧾 **Redacted log** | Path, sha256 and a 4-character preview only. Secret values are never stored |
 | 🧹 **Clean uninstall** | `remove` restores your hook files byte-for-byte when nothing else changed |
@@ -120,7 +120,7 @@ agent-tripwire pause --for 30m   # default 30m, max 24h
 agent-tripwire resume
 ```
 
-`pause` asks you to type back a random 4-letter code, and it refuses to run without an interactive terminal or inside an AI agent's shell. An agent can't switch Tripwire off for you:
+`pause` asks you to type back a random 4-letter code, and it refuses to run without an interactive terminal or inside an AI agent's shell. It's designed so an agent can't easily switch Tripwire off:
 
 <img src="https://raw.githubusercontent.com/percius47/agent-tripwire/main/docs/assets/terminal-pause-refused.png" alt="Refusing to pause: this looks like an AI agent's shell" width="760">
 
