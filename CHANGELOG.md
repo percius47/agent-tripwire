@@ -5,6 +5,8 @@
 - Fix: a shell command that names a decoy by relative path (for example `cat .env.local.old`) is now logged in the agent's own project, not another guarded project with the same decoy name
 - Fix: Claude Code tamper attempts are logged as `deny`, matching what Claude was told (was `ask`)
 - Docs: README rewrite with real screenshots, CONTRIBUTING.md and SECURITY.md
+- Docs: clearer wording for how `pause` works
+- Fix: `--version` now reports 0.2.1
 
 ## 0.2.0
 

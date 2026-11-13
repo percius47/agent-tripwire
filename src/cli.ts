@@ -27,7 +27,7 @@ program
   .description(
     "Plant decoy credentials and block/alert when Cursor or Claude Code touch them",
   )
-  .version("0.2.0");
+  .version("0.2.1");
 
 program
   .command("init")
